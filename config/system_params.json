@@ -1,0 +1,24 @@
+ // config/system_params.json
+{
+    "standard": {
+        "M": 32,
+        "N": 32,
+        "lambda": 0.05,
+        "frequency": 6e9,
+        "description": "Standard 6GHz configuration"
+    },
+    "mmwave": {
+        "M": 64,
+        "N": 64, 
+        "lambda": 0.01,
+        "frequency": 30e9,
+        "description": "mmWave 30GHz configuration"
+    },
+    "test_small": {
+        "M": 16,
+        "N": 16,
+        "lambda": 0.05,
+        "frequency": 6e9,
+        "description": "Small configuration for testing"
+    }
+}

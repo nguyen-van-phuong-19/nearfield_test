@@ -1,0 +1,4 @@
+NumPy >= 1.20.0
+Matplotlib >= 3.3.0
+SciPy >= 1.7.0
+joblib >= 1.0.0

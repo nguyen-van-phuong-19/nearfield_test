@@ -1,0 +1,30 @@
+ // config/simulation_configs.json
+{
+    "quick_test": {
+        "num_users_list": [5],
+        "z_min": 1.0,
+        "z_max": 100.0,
+        "num_z_points": 5,
+        "num_realizations": 10,
+        "x_range": [-5, 5],
+        "y_range": [-5, 5]
+    },
+    "standard_sim": {
+        "num_users_list": [5, 10],
+        "z_min": 0.1,
+        "z_max": 200.0,
+        "num_z_points": 20,
+        "num_realizations": 50,
+        "x_range": [-10, 10],
+        "y_range": [-10, 10]
+    },
+    "comprehensive": {
+        "num_users_list": [5, 10, 15, 20],
+        "z_min": 0.1,
+        "z_max": 500.0,
+        "num_z_points": 50,
+        "num_realizations": 100,
+        "x_range": [-15, 15],
+        "y_range": [-15, 15]
+    }
+}
