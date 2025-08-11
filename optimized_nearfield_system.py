@@ -14,6 +14,26 @@ import multiprocessing as mp
 
 warnings.filterwarnings('ignore')
 
+
+def _process_z_batch(args):
+    """Helper function for multiprocessing over z values.
+
+    Defined at module level so it can be pickled when using
+    ``ProcessPoolExecutor`` on platforms like Windows where the spawn
+    start method is used. Each worker receives the simulator instance,
+    the current distance ``z`` and other parameters required to process
+    the realizations for that distance.
+    """
+
+    simulator, z, num_users, config = args
+    # Different random seed for each process to avoid correlated results
+    np.random.seed(int(time.time() * 1000) % 2**32)
+    z_results = []
+    for _ in range(config.num_realizations):
+        result = simulator.process_single_realization_optimized(z, num_users, config)
+        z_results.append(result)
+    return z, z_results
+
 @dataclass
 class SystemParameters:
     """Tham số hệ thống chuẩn hóa"""
@@ -316,21 +336,20 @@ class OptimizedNearFieldBeamformingSimulator:
         
         for num_users in config.num_users_list:
             print(f"\n--- Simulation cho {num_users} users ---")
-            
-            def process_z_batch(z):
-                """Process all realizations for one z value"""
-                np.random.seed(int(time.time() * 1000) % 2**32)  # Random seed cho mỗi process
-                z_results = []
-                for _ in range(config.num_realizations):
-                    result = self.process_single_realization_optimized(z, num_users, config)
-                    z_results.append(result)
-                return z, z_results
-            
-            # Parallel processing
-            n_jobs = config.n_jobs if config.n_jobs != -1 else min(len(config.z_values), mp.cpu_count())
-            
+
+            # Parallel processing: ensure function is picklable by using
+            # the module-level helper ``_process_z_batch`` defined above.
+            n_jobs = (
+                config.n_jobs
+                if config.n_jobs != -1
+                else min(len(config.z_values), mp.cpu_count())
+            )
+
+            args_iterable = (
+                (self, z, num_users, config) for z in config.z_values
+            )
             with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-                z_results_list = list(executor.map(process_z_batch, config.z_values))
+                z_results_list = list(executor.map(_process_z_batch, args_iterable))
             
             # Organize results
             user_results = {}
