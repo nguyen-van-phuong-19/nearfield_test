@@ -5,6 +5,12 @@ Script kiểm tra cài đặt và chức năng cơ bản
 import sys
 import time
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor
+
+
+def dummy_task(x):
+    """Simple task used for parallel processing test."""
+    return x ** 2
 
 def test_basic_imports():
     """Test import các library cần thiết"""
@@ -42,16 +48,13 @@ def test_numpy_performance():
 def test_parallel_processing():
     """Test parallel processing capability"""
     print("\nTesting parallel processing...")
-    
-    def dummy_task(x):
-        return x**2
-    
+
     # Test với ProcessPoolExecutor
     start_time = time.time()
     with ProcessPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(dummy_task, range(100)))
     elapsed = time.time() - start_time
-    
+
     print(f"✓ Parallel processing test: {elapsed:.3f}s")
     return True
 
