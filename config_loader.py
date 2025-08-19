@@ -4,9 +4,14 @@ import numpy as np
 from optimized_nearfield_system import SystemParameters, SimulationConfig
 
 class ConfigManager:
-    """Quản lý cấu hình từ files"""
-    
+    """Quản lý cấu hình mô phỏng từ các file JSON."""
+
     def __init__(self, config_dir="config"):
+        """Khởi tạo trình quản lý cấu hình.
+
+        Args:
+            config_dir: Thư mục chứa các file cấu hình.
+        """
         self.config_dir = config_dir
         self.system_configs = self.load_system_configs()
         self.sim_configs = self.load_simulation_configs()
@@ -30,10 +35,17 @@ class ConfigManager:
             return {}
     
     def get_system_params(self, config_name):
-        """Tạo SystemParameters từ config name"""
+        """Tạo ``SystemParameters`` từ tên cấu hình.
+
+        Args:
+            config_name: Tên cấu hình hệ thống cần lấy.
+
+        Returns:
+            Đối tượng ``SystemParameters``.
+        """
         if config_name not in self.system_configs:
             raise ValueError(f"Unknown system config: {config_name}")
-        
+
         config = self.system_configs[config_name]
         return SystemParameters(
             M=config["M"],
@@ -43,10 +55,17 @@ class ConfigManager:
         )
     
     def get_simulation_config(self, config_name):
-        """Tạo SimulationConfig từ config name"""
+        """Tạo ``SimulationConfig`` từ tên cấu hình.
+
+        Args:
+            config_name: Tên cấu hình mô phỏng cần lấy.
+
+        Returns:
+            Đối tượng ``SimulationConfig``.
+        """
         if config_name not in self.sim_configs:
             raise ValueError(f"Unknown simulation config: {config_name}")
-        
+
         config = self.sim_configs[config_name]
         return SimulationConfig(
             num_users_list=config["num_users_list"],

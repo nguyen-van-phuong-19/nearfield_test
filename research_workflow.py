@@ -17,6 +17,12 @@ class ResearchWorkflow:
     """
     
     def __init__(self, project_name, base_dir="research_projects"):
+        """Khởi tạo workflow nghiên cứu.
+
+        Args:
+            project_name: Tên dự án nghiên cứu.
+            base_dir: Thư mục gốc lưu trữ dự án.
+        """
         self.project_name = project_name
         self.project_dir = f"{base_dir}/{project_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.setup_project_directory()
@@ -52,12 +58,11 @@ class ResearchWorkflow:
             f.write(log_message + '\n')
     
     def run_parameter_study(self, param_ranges, base_config="standard"):
-        """
-        Chạy parameter study với nhiều giá trị khác nhau
-        
+        """Chạy parameter study với nhiều giá trị khác nhau.
+
         Args:
-            param_ranges: dict với format {'param_name': [values_to_test]}
-            base_config: tên config cơ sở
+            param_ranges: Dict ``{'ten_tham_so': [danh_sach_gia_tri]}``.
+            base_config: Tên cấu hình cơ sở.
         """
         self.log("Starting parameter study")
         self.log(f"Base config: {base_config}")
@@ -104,13 +109,22 @@ class ResearchWorkflow:
         return results
     
     def modify_param(self, base_params, param_name, new_value):
-        """Modify một parameter trong SystemParameters"""
+        """Thay đổi một tham số trong ``SystemParameters``.
+
+        Args:
+            base_params: ``SystemParameters`` gốc.
+            param_name: Tên tham số cần sửa.
+            new_value: Giá trị mới.
+        """
         from dataclasses import replace
         return replace(base_params, **{param_name: new_value})
     
     def run_comparative_study(self, system_configs, sim_config="standard_sim"):
-        """
-        Chạy comparative study giữa các system configurations
+        """Chạy comparative study giữa nhiều cấu hình hệ thống.
+
+        Args:
+            system_configs: Danh sách tên cấu hình hệ thống.
+            sim_config: Tên cấu hình mô phỏng dùng chung.
         """
         self.log("Starting comparative study")
         self.log(f"System configs: {system_configs}")
@@ -147,7 +161,11 @@ class ResearchWorkflow:
         return results
     
     def plot_parameter_study_results(self, results):
-        """Vẽ kết quả parameter study"""
+        """Vẽ kết quả parameter study.
+
+        Args:
+            results: Dữ liệu kết quả thu được.
+        """
         for param_name, param_results in results.items():
             param_values = list(param_results.keys())
             
@@ -193,7 +211,11 @@ class ResearchWorkflow:
             plt.show()
     
     def plot_comparative_results(self, results):
-        """Vẽ kết quả comparative study"""
+        """Vẽ kết quả comparative study.
+
+        Args:
+            results: Dữ liệu kết quả so sánh.
+        """
         config_names = list(results.keys())
         
         # Extract performance metrics
@@ -277,7 +299,12 @@ class ResearchWorkflow:
         plt.show()
     
     def save_results(self, results, filename):
-        """Lưu results vào file"""
+        """Lưu kết quả vào file.
+
+        Args:
+            results: Dữ liệu kết quả.
+            filename: Tên file lưu trữ.
+        """
         filepath = f"{self.project_dir}/data/{filename}"
         with open(filepath, 'wb') as f:
             pickle.dump(results, f)
@@ -285,7 +312,11 @@ class ResearchWorkflow:
         self.log(f"Results saved to: {filepath}")
     
     def generate_report(self, results):
-        """Tạo báo cáo tóm tắt"""
+        """Tạo báo cáo văn bản tóm tắt kết quả.
+
+        Args:
+            results: Dữ liệu kết quả mô phỏng.
+        """
         report_path = f"{self.project_dir}/research_report.md"
         
         with open(report_path, 'w') as f:
