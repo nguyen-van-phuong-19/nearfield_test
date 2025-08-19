@@ -14,14 +14,13 @@ class BatchProcessor:
         self.base_output_dir.mkdir(exist_ok=True)
         
     def create_parameter_grid(self, param_dict):
-        """
-        Tạo grid tất cả combinations của parameters
-        
+        """Tạo lưới tất cả các kết hợp tham số.
+
         Args:
-            param_dict: {'param_name': [list_of_values]}
-        
+            param_dict: Dict dạng ``{'ten_tham_so': [danh_sach_gia_tri]}``.
+
         Returns:
-            List of parameter combinations
+            Danh sách các tổ hợp tham số.
         """
         keys = param_dict.keys()
         values = param_dict.values()
@@ -34,8 +33,14 @@ class BatchProcessor:
         return combinations
     
     def run_batch_simulation(self, param_grid, base_config="standard"):
-        """
-        Chạy batch simulation cho tất cả parameter combinations
+        """Chạy batch simulation cho tất cả kết hợp tham số.
+
+        Args:
+            param_grid: Danh sách dict các tham số cần thử.
+            base_config: Tên cấu hình hệ thống cơ sở để điều chỉnh.
+
+        Returns:
+            Kết quả của toàn bộ quá trình batch.
         """
         total_runs = len(param_grid)
         print(f"Starting batch processing: {total_runs} parameter combinations")

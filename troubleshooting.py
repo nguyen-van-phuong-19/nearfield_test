@@ -23,7 +23,11 @@ class SystemMonitor:
         print("Started system monitoring")
     
     def take_snapshot(self, label=""):
-        """Chụp snapshot hiệu suất"""
+        """Chụp snapshot hiệu suất.
+
+        Args:
+            label: Ghi chú cho thời điểm snapshot.
+        """
         if self.start_time is None:
             self.start_monitoring()
         
@@ -59,7 +63,12 @@ class TroubleshootingTool:
         self.monitor = SystemMonitor()
     
     def diagnose_performance_issues(self, simulator, config):
-        """Chẩn đoán vấn đề hiệu suất"""
+        """Chẩn đoán các vấn đề hiệu suất.
+
+        Args:
+            simulator: Đối tượng mô phỏng đang sử dụng.
+            config: Cấu hình mô phỏng hiện tại.
+        """
         issues = []
         recommendations = []
         
@@ -94,7 +103,14 @@ class TroubleshootingTool:
         return issues, recommendations
     
     def optimize_config_for_system(self, config):
-        """Tối ưu config dựa trên capabilities của hệ thống"""
+        """Tối ưu cấu hình theo khả năng hệ thống.
+
+        Args:
+            config: Cấu hình mô phỏng ban đầu.
+
+        Returns:
+            Cấu hình đã điều chỉnh cho phù hợp.
+        """
         optimized_config = config
         
         # Memory-based optimization
@@ -114,7 +130,12 @@ class TroubleshootingTool:
         return optimized_config
     
     def run_performance_test(self, simulator, test_positions=None):
-        """Chạy performance test để đo baseline hiệu suất"""
+        """Chạy thử nghiệm hiệu suất để lấy mốc tham chiếu.
+
+        Args:
+            simulator: Đối tượng mô phỏng.
+            test_positions: Danh sách vị trí người dùng để test.
+        """
         if test_positions is None:
             test_positions = [(0, 0, 50), (5, 5, 30), (-3, 7, 80)]
         

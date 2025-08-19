@@ -16,13 +16,19 @@ warnings.filterwarnings('ignore')
 
 
 def _process_z_batch(args):
-    """Helper function for multiprocessing over z values.
+    """Helper cho xử lý song song theo từng giá trị ``z``.
 
-    Defined at module level so it can be pickled when using
-    ``ProcessPoolExecutor`` on platforms like Windows where the spawn
-    start method is used. Each worker receives the simulator instance,
-    the current distance ``z`` and other parameters required to process
-    the realizations for that distance.
+    Args:
+        args: Tuple chứa ``(simulator, z, num_users, config)``
+
+            * ``simulator`` – đối tượng mô phỏng đã khởi tạo
+            * ``z`` – khoảng cách từ LIS tới UAV hiện tại (m)
+            * ``num_users`` – số người dùng trong lần mô phỏng
+            * ``config`` – cấu hình mô phỏng chung
+
+    Returns:
+        Tuple ``(z, z_results)`` nơi ``z_results`` là danh sách kết quả của
+        từng realization tại khoảng cách ``z``.
     """
 
     simulator, z, num_users, config = args
@@ -36,9 +42,18 @@ def _process_z_batch(args):
 
 @dataclass
 class SystemParameters:
-    """Tham số hệ thống chuẩn hóa"""
+    """Tham số hệ thống chuẩn hóa.
+
+    Attributes:
+        M: Số hàng phần tử của LIS.
+        N: Số cột phần tử của LIS.
+        lambda_: Bước sóng tín hiệu (m).
+        frequency: Tần số sóng mang (Hz).
+        d: Khoảng cách giữa các phần tử (m), mặc định ``λ/2``.
+    """
+
     M: int = 32                    # Số hàng LIS
-    N: int = 32                    # Số cột LIS  
+    N: int = 32                    # Số cột LIS
     lambda_: float = 0.05          # Bước sóng (m)
     frequency: float = 6e9         # Tần số (Hz)
     d: float = None                # Khoảng cách phần tử (sẽ tính = λ/2)
@@ -49,14 +64,24 @@ class SystemParameters:
 
 @dataclass
 class SimulationConfig:
-    """Cấu hình mô phỏng"""
+    """Cấu hình mô phỏng.
+
+    Attributes:
+        num_users_list: Danh sách số lượng người dùng cần mô phỏng.
+        z_values: Mảng giá trị khoảng cách ``z`` (m) giữa LIS và người dùng/UAV.
+        num_realizations: Số lần lặp lại cho mỗi giá trị ``z``.
+        x_range: Khoảng giá trị toạ độ ``x`` của người dùng (m).
+        y_range: Khoảng giá trị toạ độ ``y`` của người dùng (m).
+        n_jobs: Số tiến trình chạy song song (-1 sử dụng toàn bộ CPU).
+    """
+
     num_users_list: List[int] = None
     z_values: np.ndarray = None
     num_realizations: int = 100
     x_range: Tuple[float, float] = (-10.0, 10.0)
     y_range: Tuple[float, float] = (-10.0, 10.0)
     n_jobs: int = -1
-    
+
     def __post_init__(self):
         if self.num_users_list is None:
             self.num_users_list = [5, 10]
@@ -269,18 +294,24 @@ class OptimizedNearFieldBeamformingSimulator:
     
     # ================== SIMULATION CORE ==================
     
-    def process_single_realization_optimized(self, z: float, num_users: int, 
+    def process_single_realization_optimized(self, z: float, num_users: int,
                                            config: SimulationConfig) -> Dict:
+        """Xử lý một lần mô phỏng với vị trí người dùng ngẫu nhiên.
+
+        Args:
+            z: Khoảng cách từ LIS tới UAV/người dùng (m).
+            num_users: Số lượng người dùng trong lần mô phỏng.
+            config: Cấu hình mô phỏng đang sử dụng.
+
+        Returns:
+            Dictionary chứa AAG và MAG cho từng phương pháp beamforming.
         """
-        Xử lý một realization tối ưu
-        """
-        # Generate random user positions
-        positions = []
-        for _ in range(num_users):
-            x = np.random.uniform(*config.x_range)
-            y = np.random.uniform(*config.y_range)
-            positions.append((x, y, z))
-        
+
+        # Vector hóa việc tạo vị trí người dùng để tăng tốc cho số lượng lớn
+        x = np.random.uniform(config.x_range[0], config.x_range[1], size=num_users)
+        y = np.random.uniform(config.y_range[0], config.y_range[1], size=num_users)
+        positions = list(zip(x, y, np.full(num_users, z)))
+
         results = {}
         
         # Method 1: Far-field
@@ -323,58 +354,61 @@ class OptimizedNearFieldBeamformingSimulator:
         return results
     
     def run_optimized_simulation(self, config: SimulationConfig) -> Dict:
+        """Chạy mô phỏng chính với khả năng xử lý song song.
+
+        Args:
+            config: Cấu hình mô phỏng (số user, dãy ``z``, số lần lặp, ...).
+
+        Returns:
+            Kết quả tổng hợp cho tất cả kịch bản người dùng.
         """
-        Simulation chính tối ưu với parallel processing cao cấp
-        """
+
         print(f"=== BẮT ĐẦU SIMULATION TỐI ỨU ===")
         print(f"Z values: {len(config.z_values)} điểm")
         print(f"Realizations: {config.num_realizations}/z")
         print(f"User scenarios: {config.num_users_list}")
-        
+
         start_time = time.time()
         all_results = {}
-        
+
         for num_users in config.num_users_list:
             print(f"\n--- Simulation cho {num_users} users ---")
 
-            # Parallel processing: ensure function is picklable by using
-            # the module-level helper ``_process_z_batch`` defined above.
+            # Số tiến trình song song
             n_jobs = (
                 config.n_jobs
                 if config.n_jobs != -1
                 else min(len(config.z_values), mp.cpu_count())
             )
+            n_jobs = max(1, n_jobs)
 
             args_iterable = (
                 (self, z, num_users, config) for z in config.z_values
             )
-            with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-                z_results_list = list(executor.map(_process_z_batch, args_iterable))
-            
-            # Organize results
+
             user_results = {}
             method_names = None
-            
-            for z, z_results in z_results_list:
-                if method_names is None:
-                    method_names = list(z_results[0].keys())
+
+            with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+                for z, z_results in executor.map(_process_z_batch, args_iterable, chunksize=1):
+                    if method_names is None:
+                        method_names = list(z_results[0].keys())
+                        for method in method_names:
+                            user_results[method] = {'aag': [], 'mag': []}
+
+                    # Gộp kết quả cho từng z ngay khi nhận được để giảm memory
                     for method in method_names:
-                        user_results[method] = {'aag': [], 'mag': []}
-                
-                # Aggregate results for this z
-                for method in method_names:
-                    aag_vals = [r[method]['aag'] for r in z_results]
-                    mag_vals = [r[method]['mag'] for r in z_results]
-                    
-                    user_results[method]['aag'].extend(aag_vals)
-                    user_results[method]['mag'].extend(mag_vals)
-            
-            # Tính AMAG
+                        aag_vals = [r[method]['aag'] for r in z_results]
+                        mag_vals = [r[method]['mag'] for r in z_results]
+                        user_results[method]['aag'].extend(aag_vals)
+                        user_results[method]['mag'].extend(mag_vals)
+
+            # Tính AMAG sau khi đã thu thập hết dữ liệu
             for method in method_names:
                 amag = np.mean(user_results[method]['mag'])
                 user_results[method]['amag'] = amag
                 print(f"  {method}: AAG={np.mean(user_results[method]['aag']):.1f}, AMAG={amag:.1f}")
-            
+
             all_results[f'{num_users}_users'] = {
                 'z_values': config.z_values,
                 'num_users': num_users,
@@ -382,10 +416,10 @@ class OptimizedNearFieldBeamformingSimulator:
                 'results': user_results,
                 'method_names': method_names
             }
-        
+
         total_time = time.time() - start_time
         print(f"\n=== SIMULATION HOÀN THÀNH: {total_time:.1f}s ===")
-        
+
         return {
             'system_params': self.params,
             'simulation_config': config,
@@ -542,8 +576,13 @@ class OptimizedNearFieldBeamformingSimulator:
 # ================== UTILITY FUNCTIONS ==================
 
 def create_system_with_presets(preset: str = "standard") -> OptimizedNearFieldBeamformingSimulator:
-    """
-    Tạo hệ thống với các preset chuẩn
+    """Tạo hệ thống mô phỏng dựa trên preset cấu hình sẵn.
+
+    Args:
+        preset: Tên cấu hình hệ thống (``standard``, ``high_freq``, ...).
+
+    Returns:
+        Đối tượng ``OptimizedNearFieldBeamformingSimulator`` đã khởi tạo.
     """
     presets = {
         "standard": SystemParameters(M=32, N=32, lambda_=0.05, frequency=6e9),
@@ -558,8 +597,13 @@ def create_system_with_presets(preset: str = "standard") -> OptimizedNearFieldBe
     return OptimizedNearFieldBeamformingSimulator(presets[preset])
 
 def create_simulation_config(mode: str = "fast") -> SimulationConfig:
-    """
-    Tạo cấu hình simulation với các mode khác nhau
+    """Tạo cấu hình mô phỏng theo các chế độ định nghĩa sẵn.
+
+    Args:
+        mode: Tên chế độ (``fast``, ``standard``, ``comprehensive``...).
+
+    Returns:
+        Đối tượng ``SimulationConfig`` tương ứng.
     """
     configs = {
         "fast": SimulationConfig(
