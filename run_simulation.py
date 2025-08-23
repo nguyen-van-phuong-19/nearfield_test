@@ -1,4 +1,4 @@
- from optimized_nearfield_system import create_system_with_presets, create_simulation_config
+from optimized_nearfield_system import create_system_with_presets, create_simulation_config
 
 # Tạo simulator với preset chuẩn
 simulator = create_system_with_presets("standard")
