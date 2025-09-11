@@ -1,44 +1,72 @@
-from optimized_nearfield_system import create_system_with_presets, create_simulation_config
-"""Script chạy mô phỏng Near-Field Beamforming.
+"""Script chạy mô phỏng Near-Field Beamforming với tùy chỉnh tham số."""
 
-Cho phép lựa chọn preset hệ thống và chế độ mô phỏng, phù hợp khi cần
-mô phỏng với số lượng người dùng lớn."""
+import json
+from pathlib import Path
 
-import argparse
 from optimized_nearfield_system import create_system_with_presets, create_simulation_config
 
+PARAM_FILE = Path("config/user_params.json")
 
-def parse_args() -> argparse.Namespace:
-    """Phân tích các tham số đầu vào từ dòng lệnh.
 
-    Returns:
-        Namespace chứa ``preset``, ``mode`` và ``users``.
-    """
-    parser = argparse.ArgumentParser(description="Chạy mô phỏng LIS-UAV")
-    parser.add_argument("--preset", default="standard", help="Tên preset hệ thống")
-    parser.add_argument("--mode", default="fast", help="Chế độ cấu hình mô phỏng")
-    parser.add_argument(
-        "--users",
-        type=int,
-        default=None,
-        help="Số người dùng mô phỏng (ghi đè cấu hình)"
-    )
-    return parser.parse_args()
+def load_saved_params() -> dict:
+    """Đọc tham số mô phỏng đã lưu hoặc trả về giá trị mặc định."""
+    if PARAM_FILE.exists():
+        with open(PARAM_FILE, "r") as f:
+            return json.load(f)
+    return {"preset": "standard", "mode": "fast", "users": None}
+
+
+def save_params(params: dict) -> None:
+    """Lưu tham số mô phỏng cho các lần chạy sau."""
+    PARAM_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(PARAM_FILE, "w") as f:
+        json.dump(params, f)
+
+
+def customize_params(current: dict) -> dict:
+    """Tương tác để người dùng điều chỉnh tham số mô phỏng."""
+    print("Nhập tên preset hệ thống (standard, high_freq, large_array, small_test).")
+    preset = input(f"Preset [{current['preset']}]: ").strip() or current['preset']
+
+    print("Nhập chế độ mô phỏng (fast, standard, comprehensive).")
+    mode = input(f"Mode [{current['mode']}]: ").strip() or current['mode']
+
+    print("Nhập số người dùng (ví dụ 5). Để trống để giữ nguyên giá trị hiện tại.")
+    users_str = input(f"Số người dùng [{current['users']}]: ").strip()
+    users = int(users_str) if users_str else current['users']
+
+    return {"preset": preset, "mode": mode, "users": users}
+
+
+def choose_parameters() -> dict:
+    """Hiển thị menu lựa chọn và trả về tham số mô phỏng cuối cùng."""
+    saved = load_saved_params()
+    print("=== Thiết lập tham số mô phỏng ===")
+    print(f"1. Dùng tham số đã lưu (preset={saved['preset']}, mode={saved['mode']}, users={saved['users']})")
+    print("2. Dùng tham số mặc định (preset=standard, mode=fast)")
+    print("3. Tùy chỉnh tham số")
+    choice = input("Lựa chọn [1/2/3]: ").strip()
+
+    if choice == "2":
+        params = {"preset": "standard", "mode": "fast", "users": None}
+    elif choice == "3":
+        params = customize_params(saved)
+    else:
+        params = saved
+
+    save_params(params)
+    return params
 
 
 def main() -> None:
-    args = parse_args()
+    params = choose_parameters()
 
-    # Khởi tạo simulator từ preset
-    simulator = create_system_with_presets(args.preset)
+    simulator = create_system_with_presets(params["preset"])
 
-    # Tạo cấu hình mô phỏng
-    config = create_simulation_config(args.mode)
-    if args.users is not None:
-        # Ghi chú: num_users_list là danh sách, nên chuyển thành list một phần tử
-        config.num_users_list = [args.users]
+    config = create_simulation_config(params["mode"])
+    if params["users"] is not None:
+        config.num_users_list = [params["users"]]
 
-    # Chạy mô phỏng và lưu kết quả
     results = simulator.run_optimized_simulation(config)
     simulator.plot_comprehensive_results(results, save_dir="my_results")
 
