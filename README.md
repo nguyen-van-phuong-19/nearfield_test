@@ -227,8 +227,10 @@ Ví dụ 3: Demo script tương tác
 python# Chạy demo tương tác
 python demo_script.py
 
-# Hoặc chạy tự động tất cả demos
-python demo_script.py auto
+# Chạy một demo cụ thể bằng tùy chọn --demo
+python demo_script.py --demo basic      # Demo tính năng cơ bản
+python demo_script.py --demo gui        # Kiểm tra lỗi GUI
+python demo_script.py --demo all        # Chạy toàn bộ demos
 📁 Cấu trúc dự án
 nearfield-beamforming/
 ├── README.md                           # This file
