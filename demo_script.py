@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import time
 import os
 from datetime import datetime
+import argparse
 
 # Import simulator (assuming the optimized code is saved as nearfield_simulator.py)
 try:
@@ -357,6 +358,26 @@ def demo_performance_benchmark():
     
     return benchmark_results
 
+
+def demo_gui_error_check():
+    """Demo kiểm tra lỗi giao diện GUI khi mô phỏng"""
+    print("\n" + "="*60)
+    print("DEMO 6: KIỂM TRA GUI SIMULATION")
+    print("="*60)
+
+    try:
+        import tkinter as tk
+        from gui_simulation import SimulationGUI
+
+        root = tk.Tk()
+        root.withdraw()  # chạy ẩn để tránh yêu cầu hiển thị
+        gui = SimulationGUI(root)
+        gui.run_simulation()
+        root.destroy()
+        print("GUI simulation chạy thành công không lỗi.")
+    except Exception as e:
+        print(f"GUI simulation gặp lỗi: {e}")
+
 def run_all_demos():
     """Chạy tất cả các demo"""
     print("="*70)
@@ -399,6 +420,9 @@ def run_all_demos():
         
         # Demo 5: Performance benchmark
         demo_results['benchmark'] = demo_performance_benchmark()
+
+        # Demo 6: GUI error check
+        demo_results['gui'] = demo_gui_error_check()
         
         print("\n" + "="*70)
         print("TẤT CẢ DEMO ĐÃ HOÀN THÀNH THÀNH CÔNG!")
@@ -434,45 +458,70 @@ def run_all_demos():
 def main():
     """Hàm main để chạy demo"""
     print("Khởi động Near-Field Beamforming Demo...")
-    
+
     # Thiết lập random seed cho reproducibility
     np.random.seed(42)
-    
-    # Chạy interactive demo hoặc auto demo
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == 'auto':
-        # Auto mode - chạy tất cả
-        results, output_dir = run_all_demos()
+
+    parser = argparse.ArgumentParser(description="Chạy các demo mô phỏng")
+    parser.add_argument(
+        "--demo",
+        choices=[
+            "basic",
+            "params",
+            "fast",
+            "compare",
+            "benchmark",
+            "gui",
+            "all",
+        ],
+        help="Chọn demo để chạy",
+    )
+    args = parser.parse_args()
+
+    if args.demo:
+        demo_map = {
+            "basic": demo_basic_functionality,
+            "params": demo_parameter_analysis,
+            "fast": demo_fast_simulation,
+            "compare": demo_comparison_analysis,
+            "benchmark": demo_performance_benchmark,
+            "gui": demo_gui_error_check,
+            "all": run_all_demos,
+        }
+        demo_map[args.demo]()
+        return
+
+    # Interactive mode nếu không truyền tham số
+    print("\nChọn demo để chạy:")
+    print("1. Basic Functionality Test")
+    print("2. Parameter Analysis")
+    print("3. Fast Simulation")
+    print("4. Comparison Analysis")
+    print("5. Performance Benchmark")
+    print("6. GUI Error Check")
+    print("7. Run All Demos")
+    print("0. Exit")
+
+    choice = input("\nNhập lựa chọn (0-7): ").strip()
+
+    if choice == '1':
+        demo_basic_functionality()
+    elif choice == '2':
+        demo_parameter_analysis()
+    elif choice == '3':
+        demo_fast_simulation()
+    elif choice == '4':
+        demo_comparison_analysis()
+    elif choice == '5':
+        demo_performance_benchmark()
+    elif choice == '6':
+        demo_gui_error_check()
+    elif choice == '7':
+        run_all_demos()
+    elif choice == '0':
+        print("Thoát demo.")
     else:
-        # Interactive mode
-        print("\nChọn demo để chạy:")
-        print("1. Basic Functionality Test")
-        print("2. Parameter Analysis") 
-        print("3. Fast Simulation")
-        print("4. Comparison Analysis")
-        print("5. Performance Benchmark")
-        print("6. Run All Demos")
-        print("0. Exit")
-        
-        choice = input("\nNhập lựa chọn (0-6): ").strip()
-        
-        if choice == '1':
-            demo_basic_functionality()
-        elif choice == '2':
-            demo_parameter_analysis()
-        elif choice == '3':
-            demo_fast_simulation()
-        elif choice == '4':
-            demo_comparison_analysis()
-        elif choice == '5':
-            demo_performance_benchmark()
-        elif choice == '6':
-            run_all_demos()
-        elif choice == '0':
-            print("Thoát demo.")
-        else:
-            print("Lựa chọn không hợp lệ.")
+        print("Lựa chọn không hợp lệ.")
 
 if __name__ == "__main__":
     main()
