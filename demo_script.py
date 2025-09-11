@@ -13,6 +13,8 @@ import time
 import os
 from datetime import datetime
 import argparse
+import json
+from typing import Optional
 
 # Import simulator (assuming the optimized code is saved as nearfield_simulator.py)
 try:
@@ -160,45 +162,58 @@ def demo_parameter_analysis():
     
     return results_by_size
 
-def demo_fast_simulation():
-    """Demo simulation nhanh với cấu hình tối ưu"""
+def demo_fast_simulation(preset: str = "small_test", mode: str = "fast", users: Optional[int] = None):
+    """Demo simulation nhanh với cấu hình tùy chỉnh"""
     print("\n" + "="*60)
     print("DEMO 3: SIMULATION NHANH VỚI PARALLEL PROCESSING")
     print("="*60)
-    
-    # Sử dụng preset để tạo simulator
-    simulator = create_system_with_presets("small_test")  # 16x16 LIS for speed
-    
-    # Cấu hình simulation nhanh
-    config = create_simulation_config("fast")
+
+    # Tạo simulator theo preset
+    simulator = create_system_with_presets(preset)
+
+    # Tạo cấu hình simulation theo mode
+    config = create_simulation_config(mode)
     config.num_realizations = 10  # Giảm để chạy nhanh hơn trong demo
     config.z_values = np.linspace(1, 100, 5)  # Chỉ 5 điểm
-    
+    if users is not None:
+        config.num_users_list = [users]
+
     print(f"Cấu hình simulation:")
+    print(f"- Preset: {preset}")
+    print(f"- Mode: {mode}")
     print(f"- LIS size: {simulator.params.M}x{simulator.params.N}")
     print(f"- Users: {config.num_users_list}")
     print(f"- Z values: {len(config.z_values)} điểm")
     print(f"- Realizations: {config.num_realizations}")
-    
+
     # Chạy simulation
     start_time = time.time()
     results = simulator.run_optimized_simulation(config)
     simulation_time = time.time() - start_time
-    
+
     print(f"\nSimulation hoàn thành trong {simulation_time:.2f} giây")
-    
+
     # Tạo thư mục lưu kết quả
     output_dir = f"demo_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Vẽ đồ thị
     simulator.plot_comprehensive_results(results, save_dir=output_dir)
-    
-    # Lưu kết quả
+
+    # Lưu kết quả và cấu hình
     simulator.save_results(results, f"{output_dir}/simulation_results.pkl")
-    
+    config_data = {
+        "preset": preset,
+        "mode": mode,
+        "num_users_list": config.num_users_list,
+        "z_values": config.z_values.tolist(),
+        "num_realizations": config.num_realizations,
+    }
+    with open(f"{output_dir}/config.json", "w") as f:
+        json.dump(config_data, f, indent=2)
+
     print(f"Kết quả đã lưu tại thư mục: {output_dir}")
-    
+
     return results, output_dir
 
 def demo_comparison_analysis():
@@ -476,19 +491,28 @@ def main():
         ],
         help="Chọn demo để chạy",
     )
+    parser.add_argument("--preset", help="Preset cho fast simulation")
+    parser.add_argument("--mode", help="Simulation mode")
+    parser.add_argument("--users", type=int, help="Số lượng users cho simulation")
     args = parser.parse_args()
 
     if args.demo:
-        demo_map = {
-            "basic": demo_basic_functionality,
-            "params": demo_parameter_analysis,
-            "fast": demo_fast_simulation,
-            "compare": demo_comparison_analysis,
-            "benchmark": demo_performance_benchmark,
-            "gui": demo_gui_error_check,
-            "all": run_all_demos,
-        }
-        demo_map[args.demo]()
+        if args.demo == "fast":
+            demo_fast_simulation(
+                preset=args.preset or "small_test",
+                mode=args.mode or "fast",
+                users=args.users,
+            )
+        else:
+            demo_map = {
+                "basic": demo_basic_functionality,
+                "params": demo_parameter_analysis,
+                "compare": demo_comparison_analysis,
+                "benchmark": demo_performance_benchmark,
+                "gui": demo_gui_error_check,
+                "all": run_all_demos,
+            }
+            demo_map[args.demo]()
         return
 
     # Interactive mode nếu không truyền tham số
@@ -509,7 +533,11 @@ def main():
     elif choice == '2':
         demo_parameter_analysis()
     elif choice == '3':
-        demo_fast_simulation()
+        preset = input("Preset (default small_test): ").strip() or "small_test"
+        mode = input("Mode (default fast): ").strip() or "fast"
+        users_input = input("Number of users (optional): ").strip()
+        users = int(users_input) if users_input else None
+        demo_fast_simulation(preset=preset, mode=mode, users=users)
     elif choice == '4':
         demo_comparison_analysis()
     elif choice == '5':
