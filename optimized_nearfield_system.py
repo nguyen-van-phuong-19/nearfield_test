@@ -429,15 +429,18 @@ class OptimizedNearFieldBeamformingSimulator:
     
     # ================== VISUALIZATION ==================
     
-    def plot_comprehensive_results(self, simulation_results: Dict, save_dir: str = None):
-        """
-        Vẽ tất cả đồ thị kết quả một cách comprehensive
+    def plot_comprehensive_results(self, simulation_results: Dict, save_dir: str = None) -> List[plt.Figure]:
+        """Vẽ tất cả đồ thị kết quả và trả về danh sách ``Figure``.
+
+        Việc trả về đối tượng ``Figure`` cho phép tích hợp với các giao diện GUI
+        mà không phụ thuộc vào backend của Matplotlib. Hàm vẫn giữ nguyên hành vi
+        cũ là hiển thị các đồ thị bằng ``plt.show()``.
         """
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
-        
+
         all_results = simulation_results['all_results']
-        
+
         # Style mapping
         style_map = {
             'Far-field': {'color': 'black', 'linestyle': '-', 'marker': 'o'},
@@ -447,16 +450,18 @@ class OptimizedNearFieldBeamformingSimulator:
             'Grouped (8x8)': {'color': 'red', 'linestyle': ':', 'marker': 'p'},
             'Grouped (16x16)': {'color': 'red', 'linestyle': '-.', 'marker': '*'},
         }
-        
+
+        figures: List[plt.Figure] = []
+
         for user_key, user_data in all_results.items():
             num_users = user_data['num_users']
             z_values = user_data['z_values']
             results = user_data['results']
             method_names = user_data['method_names']
             num_realizations = user_data['num_realizations']
-            
+
             # 1. AAG vs Distance
-            plt.figure(figsize=(14, 8))
+            fig = plt.figure(figsize=(14, 8))
             for method in method_names:
                 if method in style_map:
                     style = style_map[method]
@@ -467,36 +472,62 @@ class OptimizedNearFieldBeamformingSimulator:
                         end_idx = (i + 1) * num_realizations
                         aag_mean = np.mean(results[method]['aag'][start_idx:end_idx])
                         aag_by_z.append(aag_mean)
-                    
-                    plt.plot(z_values / self.params.lambda_, aag_by_z,
-                            label=method, color=style['color'], 
-                            linestyle=style['linestyle'], marker=style['marker'],
-                            markevery=max(1, len(z_values)//8), markersize=6, linewidth=2)
-            
+
+                    plt.plot(
+                        z_values / self.params.lambda_,
+                        aag_by_z,
+                        label=method,
+                        color=style['color'],
+                        linestyle=style['linestyle'],
+                        marker=style['marker'],
+                        markevery=max(1, len(z_values) // 8),
+                        markersize=6,
+                        linewidth=2,
+                    )
+
             # Vẽ ranh giới
-            plt.axvline(x=self.d_0 / self.params.lambda_, color='gray', linestyle=':', 
-                       label=f'Fresnel boundary = {self.d_0:.1f}m', alpha=0.7)
-            plt.axvline(x=self.d_F1 / self.params.lambda_, color='gray', linestyle='--', 
-                       label=f'Fraunhofer 1 = {self.d_F1:.1f}m', alpha=0.7)
-            plt.axvline(x=self.d_F2 / self.params.lambda_, color='gray', linestyle='-.', 
-                       label=f'Fraunhofer 2 = {self.d_F2:.1f}m', alpha=0.7)
-            
+            plt.axvline(
+                x=self.d_0 / self.params.lambda_,
+                color='gray',
+                linestyle=':',
+                label=f'Fresnel boundary = {self.d_0:.1f}m',
+                alpha=0.7,
+            )
+            plt.axvline(
+                x=self.d_F1 / self.params.lambda_,
+                color='gray',
+                linestyle='--',
+                label=f'Fraunhofer 1 = {self.d_F1:.1f}m',
+                alpha=0.7,
+            )
+            plt.axvline(
+                x=self.d_F2 / self.params.lambda_,
+                color='gray',
+                linestyle='-.',
+                label=f'Fraunhofer 2 = {self.d_F2:.1f}m',
+                alpha=0.7,
+            )
+
             plt.xlabel('Distance (z/λ)', fontsize=12)
             plt.ylabel('Average Array Gain (AAG)', fontsize=12)
             plt.title(f'AAG vs Distance - {num_users} Users', fontsize=14)
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
             plt.grid(True, alpha=0.3)
-            plt.xlim(z_values[0]/self.params.lambda_, z_values[-1]/self.params.lambda_)
+            plt.xlim(z_values[0] / self.params.lambda_, z_values[-1] / self.params.lambda_)
             plt.ylim(bottom=0)
-            
+
             if save_dir:
                 plt.tight_layout()
-                plt.savefig(f"{save_dir}/aag_vs_distance_{num_users}users.png", 
-                           dpi=300, bbox_inches='tight')
+                fig.savefig(
+                    f"{save_dir}/aag_vs_distance_{num_users}users.png",
+                    dpi=300,
+                    bbox_inches='tight',
+                )
+            figures.append(fig)
             plt.show()
-            
+
             # 2. AMAG vs Distance
-            plt.figure(figsize=(14, 8))
+            fig = plt.figure(figsize=(14, 8))
             for method in method_names:
                 if method in style_map:
                     style = style_map[method]
@@ -506,46 +537,77 @@ class OptimizedNearFieldBeamformingSimulator:
                         end_idx = (i + 1) * num_realizations
                         mag_mean = np.mean(results[method]['mag'][start_idx:end_idx])
                         amag_by_z.append(mag_mean)
-                    
-                    plt.plot(z_values / self.params.lambda_, amag_by_z,
-                            label=method, color=style['color'], 
-                            linestyle=style['linestyle'], marker=style['marker'],
-                            markevery=max(1, len(z_values)//8), markersize=6, linewidth=2)
-            
-            plt.axvline(x=self.d_0 / self.params.lambda_, color='gray', linestyle=':', 
-                       label=f'Fresnel boundary = {self.d_0:.1f}m', alpha=0.7)
-            plt.axvline(x=self.d_F1 / self.params.lambda_, color='gray', linestyle='--', 
-                       label=f'Fraunhofer 1 = {self.d_F1:.1f}m', alpha=0.7)
-            plt.axvline(x=self.d_F2 / self.params.lambda_, color='gray', linestyle='-.', 
-                       label=f'Fraunhofer 2 = {self.d_F2:.1f}m', alpha=0.7)
+
+                    plt.plot(
+                        z_values / self.params.lambda_,
+                        amag_by_z,
+                        label=method,
+                        color=style['color'],
+                        linestyle=style['linestyle'],
+                        marker=style['marker'],
+                        markevery=max(1, len(z_values) // 8),
+                        markersize=6,
+                        linewidth=2,
+                    )
+
+            plt.axvline(
+                x=self.d_0 / self.params.lambda_,
+                color='gray',
+                linestyle=':',
+                label=f'Fresnel boundary = {self.d_0:.1f}m',
+                alpha=0.7,
+            )
+            plt.axvline(
+                x=self.d_F1 / self.params.lambda_,
+                color='gray',
+                linestyle='--',
+                label=f'Fraunhofer 1 = {self.d_F1:.1f}m',
+                alpha=0.7,
+            )
+            plt.axvline(
+                x=self.d_F2 / self.params.lambda_,
+                color='gray',
+                linestyle='-.',
+                label=f'Fraunhofer 2 = {self.d_F2:.1f}m',
+                alpha=0.7,
+            )
             
             plt.xlabel('Distance (z/λ)', fontsize=12)
             plt.ylabel('Average Minimum Array Gain (AMAG)', fontsize=12)
             plt.title(f'AMAG vs Distance - {num_users} Users', fontsize=14)
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
             plt.grid(True, alpha=0.3)
-            plt.xlim(z_values[0]/self.params.lambda_, z_values[-1]/self.params.lambda_)
+            plt.xlim(z_values[0] / self.params.lambda_, z_values[-1] / self.params.lambda_)
             plt.ylim(bottom=0)
-            
+
             if save_dir:
                 plt.tight_layout()
-                plt.savefig(f"{save_dir}/amag_vs_distance_{num_users}users.png", 
-                           dpi=300, bbox_inches='tight')
+                fig.savefig(
+                    f"{save_dir}/amag_vs_distance_{num_users}users.png",
+                    dpi=300,
+                    bbox_inches='tight',
+                )
+            figures.append(fig)
             plt.show()
-            
+
             # 3. CDF AAG
-            plt.figure(figsize=(12, 8))
+            fig = plt.figure(figsize=(12, 8))
             for method in method_names:
                 if method in style_map and len(results[method]['aag']) > 0:
                     style = style_map[method]
                     data = results[method]['aag']
                     sorted_data = np.sort(data)
                     y = np.arange(1, len(sorted_data) + 1) / len(sorted_data)
-                    
-                    plt.plot(sorted_data, y, label=method, 
-                            color=style['color'], linestyle=style['linestyle'], 
-                            linewidth=2)
-            
+
+                    plt.plot(
+                        sorted_data,
+                        y,
+                        label=method,
+                        color=style['color'],
+                        linestyle=style['linestyle'],
+                        linewidth=2,
+                    )
+
             plt.xlabel('Average Array Gain', fontsize=12)
             plt.ylabel('CDF', fontsize=12)
             plt.title(f'CDF of AAG - {num_users} Users', fontsize=14)
@@ -553,12 +615,18 @@ class OptimizedNearFieldBeamformingSimulator:
             plt.grid(True, alpha=0.3)
             plt.xlim(left=0)
             plt.ylim(0, 1)
-            
+
             if save_dir:
                 plt.tight_layout()
-                plt.savefig(f"{save_dir}/cdf_aag_{num_users}users.png", 
-                           dpi=300, bbox_inches='tight')
+                fig.savefig(
+                    f"{save_dir}/cdf_aag_{num_users}users.png",
+                    dpi=300,
+                    bbox_inches='tight',
+                )
+            figures.append(fig)
             plt.show()
+
+        return figures
     
     def save_results(self, simulation_results: Dict, filepath: str):
         """Lưu kết quả simulation"""
