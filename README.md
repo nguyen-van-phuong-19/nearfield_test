@@ -111,9 +111,25 @@ simulator.plot_comprehensive_results(results, save_dir="my_results")
 
 # 5. Lưu kết quả
 simulator.save_results(results, "simulation_results.pkl")
+
+### Chạy mô phỏng tương tác
+
+Bạn có thể chạy `run_simulation.py` để thiết lập tham số trước khi mô phỏng:
+
+```bash
+python run_simulation.py
+```
+
+Chương trình sẽ hiển thị các lựa chọn:
+
+1. Dùng tham số đã lưu  
+2. Dùng tham số mặc định  
+3. Tùy chỉnh tham số theo hướng dẫn
+
+Các tham số tùy chỉnh được lưu trong `config/user_params.json` và tự động sử dụng cho lần chạy sau nếu bạn không nhập giá trị mới.
 Advanced Usage
 pythonfrom optimized_nearfield_system import (
-    SystemParameters, 
+    SystemParameters,
     SimulationConfig,
     OptimizedNearFieldBeamformingSimulator
 )
