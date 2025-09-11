@@ -127,6 +127,16 @@ Chương trình sẽ hiển thị các lựa chọn:
 3. Tùy chỉnh tham số theo hướng dẫn
 
 Các tham số tùy chỉnh được lưu trong `config/user_params.json` và tự động sử dụng cho lần chạy sau nếu bạn không nhập giá trị mới.
+
+### Giao diện GUI
+
+Nếu muốn chạy mô phỏng và xem kết quả trực tiếp trên giao diện đồ họa, sử dụng:
+
+```bash
+python gui_simulation.py
+```
+
+Ứng dụng GUI cho phép nhập nhanh các tham số mô phỏng và hiển thị ngay các đồ thị kết quả.
 Advanced Usage
 pythonfrom optimized_nearfield_system import (
     SystemParameters,
