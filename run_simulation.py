@@ -1,9 +1,11 @@
 """Script chạy mô phỏng Near-Field Beamforming với tùy chỉnh tham số."""
 
 import json
+import argparse
 from pathlib import Path
 
 from optimized_nearfield_system import create_system_with_presets, create_simulation_config
+from random_params import random_basic_params
 
 PARAM_FILE = Path("config/user_params.json")
 
@@ -58,8 +60,41 @@ def choose_parameters() -> dict:
     return params
 
 
+def choose_parameters_random_enabled() -> dict:
+    """Like choose_parameters but with an extra randomize option."""
+    saved = load_saved_params()
+    print("=== Thiết lập tham số mô phỏng ===")
+    print(f"1. Dùng tham số đã lưu (preset={saved['preset']}, mode={saved['mode']}, users={saved['users']})")
+    print("2. Dùng tham số mặc định (preset=standard, mode=fast)")
+    print("3. Tuỳ chỉnh tham số")
+    print("4. Random tham số hợp lệ (preset/mode/users)")
+    choice = input("Lựa chọn [1/2/3/4]: ").strip()
+
+    if choice == "2":
+        params = {"preset": "standard", "mode": "fast", "users": None}
+    elif choice == "3":
+        params = customize_params(saved)
+    elif choice == "4":
+        params = random_basic_params()
+        print(f"Chọn ngẫu nhiên: preset={params['preset']}, mode={params['mode']}, users={params['users']}")
+    else:
+        params = saved
+
+    save_params(params)
+    return params
+
+
 def main() -> None:
-    params = choose_parameters()
+    parser = argparse.ArgumentParser(description="Run Near-Field simulation (tuỳ chỉnh hoặc random tham số)")
+    parser.add_argument("--randomize", "-r", action="store_true", help="Randomize preset/mode/users with valid values")
+    args = parser.parse_args()
+
+    if args.randomize:
+        params = random_basic_params()
+        print(f"[Random] preset={params['preset']}, mode={params['mode']}, users={params['users']}")
+        save_params(params)
+    else:
+        params = choose_parameters_random_enabled()
 
     simulator = create_system_with_presets(params["preset"])
 

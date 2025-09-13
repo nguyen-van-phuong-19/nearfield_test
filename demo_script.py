@@ -15,6 +15,7 @@ from datetime import datetime
 import argparse
 import json
 from typing import Optional
+from random_params import random_basic_params
 
 # Import simulator (assuming the optimized code is saved as nearfield_simulator.py)
 try:
@@ -494,15 +495,21 @@ def main():
     parser.add_argument("--preset", help="Preset cho fast simulation")
     parser.add_argument("--mode", help="Simulation mode")
     parser.add_argument("--users", type=int, help="Số lượng users cho simulation")
+    parser.add_argument("--randomize", "-r", action="store_true", help="Random tham s? h?p l? cho fast simulation")
     args = parser.parse_args()
 
     if args.demo:
         if args.demo == "fast":
-            demo_fast_simulation(
-                preset=args.preset or "small_test",
-                mode=args.mode or "fast",
-                users=args.users,
-            )
+            if args.randomize:
+                rp = random_basic_params()
+                print(f"[Random] preset={rp['preset']}, mode={rp['mode']}, users={rp['users']}")
+                demo_fast_simulation(preset=rp['preset'], mode=rp['mode'], users=rp['users'])
+            else:
+                demo_fast_simulation(
+                    preset=args.preset or "small_test",
+                    mode=args.mode or "fast",
+                    users=args.users,
+                )
         else:
             demo_map = {
                 "basic": demo_basic_functionality,
@@ -533,11 +540,17 @@ def main():
     elif choice == '2':
         demo_parameter_analysis()
     elif choice == '3':
-        preset = input("Preset (default small_test): ").strip() or "small_test"
-        mode = input("Mode (default fast): ").strip() or "fast"
-        users_input = input("Number of users (optional): ").strip()
-        users = int(users_input) if users_input else None
-        demo_fast_simulation(preset=preset, mode=mode, users=users)
+        rand_ans = input("Randomize parameters? [y/N]: ").strip().lower()
+        if rand_ans == 'y':
+            rp = random_basic_params()
+            print(f"[Random] preset={rp['preset']}, mode={rp['mode']}, users={rp['users']}")
+            demo_fast_simulation(preset=rp['preset'], mode=rp['mode'], users=rp['users'])
+        else:
+            preset = input("Preset (default small_test): ").strip() or "small_test"
+            mode = input("Mode (default fast): ").strip() or "fast"
+            users_input = input("Number of users (optional): ").strip()
+            users = int(users_input) if users_input else None
+            demo_fast_simulation(preset=preset, mode=mode, users=users)
     elif choice == '4':
         demo_comparison_analysis()
     elif choice == '5':

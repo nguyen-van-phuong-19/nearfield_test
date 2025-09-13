@@ -8,7 +8,8 @@ from datetime import datetime
 import pickle
 import matplotlib.pyplot as plt
 
-from optimized_nearfield_system import OptimizedNearFieldBeamformingSimulator
+from optimized_nearfield_system import OptimizedNearFieldBeamformingSimulator, create_system_with_presets, create_simulation_config
+from random_params import random_basic_params
 from config_loader import ConfigManager
 
 class ResearchWorkflow:
@@ -358,3 +359,22 @@ def example_research_workflow():
     workflow.generate_report(results)
     
     return workflow, results
+
+
+def run_random_quick_experiment():
+    """Run a quick simulation with random valid parameters.
+
+    Returns tuple (results, params_dict).
+    """
+    rp = random_basic_params()
+    print(f"[Random] preset={rp['preset']}, mode={rp['mode']}, users={rp['users']}")
+
+    simulator = create_system_with_presets(rp["preset"])
+    config = create_simulation_config(rp["mode"])
+    config.num_users_list = [rp["users"]]
+
+    # Keep it quick for exploratory runs
+    config.num_realizations = min(config.num_realizations, 20)
+    
+    results = simulator.run_optimized_simulation(config)
+    return results, rp
