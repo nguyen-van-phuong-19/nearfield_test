@@ -1,0 +1,517 @@
+import tkinter as tk
+from tkinter import ttk
+import threading
+import time
+import sys
+import queue
+from typing import List
+
+from random_params import VALID_PRESETS, VALID_MODES, random_basic_params
+
+# Demo/experiment entry points
+from demo_script import (
+    demo_basic_functionality,
+    demo_parameter_analysis,
+    demo_fast_simulation,
+    demo_comparison_analysis,
+    demo_performance_benchmark,
+    demo_gui_error_check,
+)
+from research_workflow import run_random_quick_experiment
+from optimized_nearfield_system import create_system_with_presets
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+
+class _ToolTip:
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, _e=None):
+        if self.tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 16
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        ttk.Label(tw, text=self.text, padding=(8, 4)).pack()
+
+    def _hide(self, _e=None):
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+
+class MainSimulationGUI:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        root.title("Near-Field Simulator – Main Console")
+        root.geometry("1280x820")
+        root.minsize(1024, 640)
+
+        self.running = False
+        self._setup_styles()
+
+        outer = ttk.Frame(root, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        # Header
+        header = ttk.Frame(outer)
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="Simulation Console", style="Title.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="Select tests and parameters, then Run", style="Subtitle.TLabel").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Separator(outer).pack(fill=tk.X, pady=(6, 8))
+
+        # Main split
+        paned = ttk.Panedwindow(outer, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # Left: controls
+        controls = ttk.Labelframe(paned, text="Controls", padding=(12, 10))
+        controls.grid_columnconfigure(0, weight=0)
+        controls.grid_columnconfigure(1, weight=1)
+
+        # Parameters
+        ttk.Label(controls, text="Preset:").grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=(0, 4))
+        self.preset_var = tk.StringVar(value="standard")
+        self.preset_cb = ttk.Combobox(controls, textvariable=self.preset_var, values=VALID_PRESETS, state="readonly")
+        self.preset_cb.grid(row=0, column=1, sticky="ew", pady=(0, 4))
+
+        ttk.Label(controls, text="Mode:").grid(row=1, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+        self.mode_var = tk.StringVar(value="fast")
+        self.mode_cb = ttk.Combobox(controls, textvariable=self.mode_var, values=VALID_MODES, state="readonly")
+        self.mode_cb.grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Label(controls, text="Users:").grid(row=2, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+        self.users_var = tk.IntVar(value=5)
+        self.users_spin = ttk.Spinbox(controls, from_=1, to=200, textvariable=self.users_var, width=10)
+        self.users_spin.grid(row=2, column=1, sticky="w", pady=4)
+
+        self.randomize_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(controls, text="Randomize on Run", variable=self.randomize_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(6, 2))
+
+        ttk.Separator(controls).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+
+        # Tests selection
+        tests_frame = ttk.Labelframe(controls, text="Select Tests", padding=(10, 8))
+        tests_frame.grid(row=5, column=0, columnspan=2, sticky="nsew")
+        tests_frame.grid_columnconfigure(0, weight=1)
+        self.test_vars = {
+            "Basic Functionality": tk.BooleanVar(value=False),
+            "Parameter Analysis": tk.BooleanVar(value=False),
+            "Fast Simulation": tk.BooleanVar(value=True),
+            "Comparison Analysis": tk.BooleanVar(value=False),
+            "Performance Benchmark": tk.BooleanVar(value=False),
+            "GUI Smoke Test": tk.BooleanVar(value=False),
+            "Random Quick Experiment": tk.BooleanVar(value=False),
+        }
+        r = 0
+        for name, var in self.test_vars.items():
+            ttk.Checkbutton(tests_frame, text=name, variable=var).grid(row=r, column=0, sticky=tk.W, pady=2)
+            r += 1
+        # Select all / none
+        btn_row = ttk.Frame(tests_frame)
+        btn_row.grid(row=r, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(btn_row, text="Select All", command=self._select_all).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Clear", command=self._clear_all).pack(side=tk.LEFT, padx=(6, 0))
+
+        # Run/Stop buttons
+        action_row = ttk.Frame(controls)
+        action_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        action_row.grid_columnconfigure(0, weight=1)
+        action_row.grid_columnconfigure(1, weight=1)
+        self.run_btn = ttk.Button(action_row, text="Run", style="Accent.TButton", command=self.run_selected)
+        self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.stop_btn = ttk.Button(action_row, text="Close", command=root.destroy)
+        self.stop_btn.grid(row=0, column=1, sticky="ew")
+
+        # Right: notebook (Activity / Plots / Summary) and status
+        right = ttk.Frame(paned, padding=(4, 4))
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(0, weight=1)
+
+        self.nb = ttk.Notebook(right)
+        self.nb.grid(row=0, column=0, columnspan=2, sticky="nsew")
+
+        # Activity tab
+        self.activity_tab = ttk.Frame(self.nb)
+        self.nb.add(self.activity_tab, text="Activity")
+        self.log = tk.Text(self.activity_tab, height=20, wrap="word")
+        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        yscroll = ttk.Scrollbar(self.activity_tab, orient="vertical", command=self.log.yview)
+        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log.configure(yscrollcommand=yscroll.set, state="disabled")
+
+        # Plots tab (scrollable)
+        self.plots_tab = ttk.Frame(self.nb)
+        self.nb.add(self.plots_tab, text="Plots")
+        # Canvas + inner frame for scrollable plots
+        self.plots_canvas = tk.Canvas(self.plots_tab, highlightthickness=0)
+        self.plots_scroll = ttk.Scrollbar(self.plots_tab, orient="vertical", command=self.plots_canvas.yview)
+        self.plots_canvas.configure(yscrollcommand=self.plots_scroll.set)
+        self.plots_container = ttk.Frame(self.plots_canvas)
+        self.plots_container.bind(
+            "<Configure>",
+            lambda e: self.plots_canvas.configure(scrollregion=self.plots_canvas.bbox("all")),
+        )
+        self._plots_window = self.plots_canvas.create_window((0, 0), window=self.plots_container, anchor="nw")
+        self.plots_canvas.bind(
+            "<Configure>",
+            lambda e: self.plots_canvas.itemconfigure(self._plots_window, width=e.width),
+        )
+        self.plots_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.plots_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._fig_canvases = []
+
+        # Summary tab
+        self.summary_tab = ttk.Frame(self.nb)
+        self.nb.add(self.summary_tab, text="Summary")
+        self.summary_text = tk.Text(self.summary_tab, wrap="word")
+        self.summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sum_scroll = ttk.Scrollbar(self.summary_tab, orient="vertical", command=self.summary_text.yview)
+        sum_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.summary_text.configure(yscrollcommand=sum_scroll.set, state="disabled")
+
+        status = ttk.Frame(right)
+        status.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.progress = ttk.Progressbar(status, mode="indeterminate", length=200) 
+        self.progress.pack(side=tk.LEFT) 
+        self.status_var = tk.StringVar(value="Ready.") 
+        ttk.Label(status, textvariable=self.status_var).pack(side=tk.RIGHT) 
+
+        paned.add(controls, weight=400)
+        paned.add(right, weight=600)
+
+        # Closing guard and protocol handler
+        self._closing = False
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Queue to capture printed output from worker threads
+        self._msg_queue: queue.Queue = queue.Queue()
+        self.root.after(100, self._poll_queue)
+
+        # Tooltips
+        for w, t in [
+            (self.preset_cb, "Predefined system configuration"),
+            (self.mode_cb, "Simulation depth/speed"),
+            (self.users_spin, "Number of users (1-200)"),
+            (self.run_btn, "Run selected tests with parameters"),
+        ]:
+            _ToolTip(w, t)
+
+    # ============= Actions =============
+    def _select_all(self) -> None:
+        for v in self.test_vars.values():
+            v.set(True)
+
+    def _clear_all(self) -> None:
+        for v in self.test_vars.values():
+            v.set(False)
+
+    def run_selected(self) -> None:
+        if self.running:
+            self._append_log("A run is already in progress.\n")
+            return
+        selected: List[str] = [k for k, v in self.test_vars.items() if v.get()]
+        if not selected:
+            self._append_log("No tests selected.\n")
+            return
+
+        preset = self.preset_var.get() or "standard"
+        mode = self.mode_var.get() or "fast"
+        users = int(self.users_var.get() or 5)
+
+        if self.randomize_var.get():
+            rp = random_basic_params()
+            preset, mode, users = rp["preset"], rp["mode"], int(rp["users"])
+            self.preset_var.set(preset)
+            self.mode_var.set(mode)
+            self.users_var.set(users)
+
+        self._set_running(True)
+        self._append_log(f"Starting run with preset={preset}, mode={mode}, users={users}\n")
+
+        def worker():
+            last_output = None
+            try:
+                # Redirect stdout/stderr to GUI log via queue
+                prev_out, prev_err = sys.stdout, sys.stderr
+                class _QueueWriter:
+                    def __init__(self, put_func):
+                        self._put = put_func
+                    def write(self, s):
+                        if s:
+                            try:
+                                self._put(("log_chunk", s))
+                            except Exception:
+                                pass
+                    def flush(self):
+                        pass
+                sys.stdout = sys.stderr = _QueueWriter(self._msg_queue.put)
+                # Prevent matplotlib windows from blocking the Tk GUI
+                try:
+                    import matplotlib.pyplot as plt  # noqa: WPS433
+                    _orig_show = plt.show
+                    plt.show = lambda *a, **k: None
+                except Exception:
+                    _orig_show = None
+                for name in selected:
+                    t0 = time.perf_counter()
+                    if self._closing:
+                        break
+                    self._schedule_status(f"Running: {name}")
+                    self._append_log(f"\n=== {name} ===\n")
+                    if name == "Basic Functionality":
+                        demo_basic_functionality()
+                    elif name == "Parameter Analysis":
+                        demo_parameter_analysis()
+                    elif name == "Fast Simulation": 
+                        _res, out_dir = demo_fast_simulation(preset=preset, mode=mode, users=users) 
+                        last_output = out_dir 
+                        if self._closing:
+                            break
+                        self._append_log(f"Saved results to: {out_dir}\n") 
+                        # Show results and plots in tabs
+                        try:
+                            if not self._closing:
+                                self.root.after(0, lambda p=preset, r=_res, d=out_dir: self._update_results_view(p, r, d))
+                        except Exception:
+                            pass
+                    elif name == "Comparison Analysis":
+                        demo_comparison_analysis()
+                    elif name == "Performance Benchmark":
+                        demo_performance_benchmark()
+                    elif name == "GUI Smoke Test":
+                        demo_gui_error_check()
+                    elif name == "Random Quick Experiment":
+                        _res, rp = run_random_quick_experiment()
+                        if self._closing:
+                            break
+                        self._append_log(f"Random params: {rp}\n")
+                    dt = time.perf_counter() - t0
+                    if self._closing:
+                        break
+                    self._append_log(f"{name} completed in {dt:.2f}s\n")
+                if last_output:
+                    if not self._closing:
+                        self._append_log(f"\nLatest output directory: {last_output}\n")
+            except Exception as e:
+                if not self._closing:
+                    self._append_log(f"Error: {e}\n")
+            finally:
+                # Restore stdout/stderr
+                try:
+                    sys.stdout = prev_out
+                    sys.stderr = prev_err
+                except Exception:
+                    pass
+                # Restore matplotlib show if we patched it
+                try:
+                    if _orig_show is not None:
+                        import matplotlib.pyplot as plt  # noqa: WPS433
+                        plt.show = _orig_show
+                except Exception:
+                    pass
+                if not self._closing:
+                    self._schedule_finish()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ============= Helpers =============
+    def _append_log(self, text: str) -> None:
+        def _do():
+            self.log.configure(state="normal")
+            self.log.insert("end", text)
+            self.log.see("end")
+            self.log.configure(state="disabled")
+        if not self._closing:
+            self.root.after(0, _do)
+
+    def _set_running(self, running: bool) -> None:
+        self.running = running
+        def _do():
+            try:
+                if running:
+                    self.progress.start(10)
+                    self.status_var.set("Running...")
+                    self.run_btn.state(["disabled"]) 
+                else:
+                    self.progress.stop()
+                    self.status_var.set("Ready.")
+                    self.run_btn.state(["!disabled"]) 
+            except Exception:
+                pass
+        self.root.after(0, _do)
+
+    def _schedule_finish(self) -> None:
+        if not self._closing:
+            self.root.after(0, lambda: self._set_running(False))
+
+    def _schedule_status(self, text: str) -> None:
+        if not self._closing:
+            self.root.after(0, lambda: self.status_var.set(text))
+
+    def _setup_styles(self) -> None:
+        s = ttk.Style(self.root)
+        try:
+            s.theme_use("clam")
+        except Exception:
+            pass
+        PRIMARY = "#1f77b4"
+        SUB = "#5a5a5a"
+        s.configure("Title.TLabel", font=("Segoe UI", 16, "bold"), foreground=PRIMARY)
+        s.configure("Subtitle.TLabel", font=("Segoe UI", 10), foreground=SUB)
+        s.configure("Accent.TButton", padding=6, foreground="#fff", background=PRIMARY)
+        s.map("Accent.TButton", background=[("active", "#16629a"), ("disabled", "#9bbbd3")])
+
+    # ============= Results rendering =============
+    def _update_results_view(self, preset: str, results, out_dir: str | None) -> None:
+        """Render figures and text summary in the Plots and Summary tabs."""
+        # Recreate scrollable area if it was destroyed for any reason
+        try:
+            exists = self.plots_container.winfo_exists()
+        except Exception:
+            exists = False
+        if not exists:
+            # Rebuild the scrollable plots area
+            for w in list(self.plots_tab.winfo_children()):
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            self.plots_canvas = tk.Canvas(self.plots_tab, highlightthickness=0)
+            self.plots_scroll = ttk.Scrollbar(self.plots_tab, orient="vertical", command=self.plots_canvas.yview)
+            self.plots_canvas.configure(yscrollcommand=self.plots_scroll.set)
+            self.plots_container = ttk.Frame(self.plots_canvas)
+            self.plots_container.bind(
+                "<Configure>",
+                lambda e: self.plots_canvas.configure(scrollregion=self.plots_canvas.bbox("all")),
+            )
+            self._plots_window = self.plots_canvas.create_window((0, 0), window=self.plots_container, anchor="nw")
+            self.plots_canvas.bind(
+                "<Configure>",
+                lambda e: self.plots_canvas.itemconfigure(self._plots_window, width=e.width),
+            )
+            self.plots_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            self.plots_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # Clear previous canvases (only children within container, not the scroll widgets)
+        for w in list(self.plots_container.winfo_children()):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._fig_canvases.clear()
+
+        # Build figures using a simulator with same preset
+        try:
+            import matplotlib.pyplot as plt  # type: ignore
+            orig_show = plt.show
+            plt.show = lambda *a, **k: None
+        except Exception:
+            orig_show = None
+        figs = []
+        try:
+            sim = create_system_with_presets(preset)
+            figs = sim.plot_comprehensive_results(results, save_dir=None)
+        except Exception as e:
+            self._append_log(f"Plot error: {e}\n")
+        finally:
+            try:
+                if orig_show is not None:
+                    import matplotlib.pyplot as plt  # type: ignore
+                    plt.show = orig_show
+            except Exception:
+                pass
+
+        for fig in figs:
+            canvas = FigureCanvasTkAgg(fig, master=self.plots_container)
+            canvas.draw()
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(2, 6))
+            self._fig_canvases.append(canvas)
+
+        # Update textual summary
+        self._set_summary_text(self._build_summary_text(results))
+        # Switch to plots tab to make it visible
+        try:
+            if not self._closing:
+                self.nb.select(self.plots_tab)
+        except Exception:
+            pass
+
+    def _on_close(self) -> None:
+        self._closing = True
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    # Poll queued log text produced by worker thread stdout/stderr
+    def _poll_queue(self) -> None:
+        if self._closing:
+            return
+        try:
+            while True:
+                item = self._msg_queue.get_nowait()
+                kind = item[0]
+                if kind == "log_chunk":
+                    _, chunk = item
+                    self._append_log(chunk)
+        except queue.Empty:
+            pass
+        if not self._closing:
+            self.root.after(100, self._poll_queue)
+
+    def _build_summary_text(self, simulation_results) -> str:
+        import numpy as np
+        lines = []
+        try:
+            all_results = simulation_results.get('all_results', {})
+            lines.append("Simulation Summary\n")
+            for user_key, user_data in all_results.items():
+                num_users = user_data.get('num_users')
+                z_values = user_data.get('z_values')
+                num_realizations = user_data.get('num_realizations')
+                results = user_data.get('results', {})
+                method_names = user_data.get('method_names', [])
+                lines.append(f"- Scenario: {num_users} users, z points={len(z_values)}, realizations/z={num_realizations}")
+                best_method = None
+                best_aag = -1
+                for m in method_names:
+                    aag_vals = results.get(m, {}).get('aag', [])
+                    mag_vals = results.get(m, {}).get('mag', [])
+                    aag_mean = float(np.mean(aag_vals)) if len(aag_vals) else 0.0
+                    amag_mean = float(np.mean(mag_vals)) if len(mag_vals) else 0.0
+                    lines.append(f"  • {m}: AAG={aag_mean:.2f}, AMAG={amag_mean:.2f}")
+                    if aag_mean > best_aag:
+                        best_aag = aag_mean
+                        best_method = m
+                if best_method:
+                    lines.append(f"  → Best by AAG: {best_method} ({best_aag:.2f})")
+                lines.append("")
+        except Exception as e:
+            lines.append(f"(Summary unavailable: {e})")
+        return "\n".join(lines)
+
+    def _set_summary_text(self, text: str) -> None:
+        try:
+            self.summary_text.configure(state="normal")
+            self.summary_text.delete("1.0", tk.END)
+            if text:
+                self.summary_text.insert(tk.END, text)
+            self.summary_text.configure(state="disabled")
+        except Exception:
+            pass
+
+
+def main():
+    root = tk.Tk()
+    app = MainSimulationGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

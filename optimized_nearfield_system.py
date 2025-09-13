@@ -511,13 +511,15 @@ class OptimizedNearFieldBeamformingSimulator:
             plt.xlabel('Distance (z/λ)', fontsize=12)
             plt.ylabel('Average Array Gain (AAG)', fontsize=12)
             plt.title(f'AAG vs Distance - {num_users} Users', fontsize=14)
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+            # Keep legend just outside the axes with tighter right margin
+            plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=10, borderaxespad=0.0)
             plt.grid(True, alpha=0.3)
             plt.xlim(z_values[0] / self.params.lambda_, z_values[-1] / self.params.lambda_)
             plt.ylim(bottom=0)
 
             # Ensure layout accommodates legend
-            fig.tight_layout(rect=[0, 0, 0.85, 1])
+            # Reduce reserved space on the right for a more balanced layout
+            fig.tight_layout(rect=[0, 0, 0.92, 1])
 
             if save_dir:
                 fig.savefig(
@@ -577,12 +579,12 @@ class OptimizedNearFieldBeamformingSimulator:
             plt.xlabel('Distance (z/λ)', fontsize=12)
             plt.ylabel('Average Minimum Array Gain (AMAG)', fontsize=12)
             plt.title(f'AMAG vs Distance - {num_users} Users', fontsize=14)
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+            plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=10, borderaxespad=0.0)
             plt.grid(True, alpha=0.3)
             plt.xlim(z_values[0] / self.params.lambda_, z_values[-1] / self.params.lambda_)
             plt.ylim(bottom=0)
 
-            fig.tight_layout(rect=[0, 0, 0.85, 1])
+            fig.tight_layout(rect=[0, 0, 0.92, 1])
 
             if save_dir:
                 fig.savefig(
@@ -614,12 +616,12 @@ class OptimizedNearFieldBeamformingSimulator:
             plt.xlabel('Average Array Gain', fontsize=12)
             plt.ylabel('CDF', fontsize=12)
             plt.title(f'CDF of AAG - {num_users} Users', fontsize=14)
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+            plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=10, borderaxespad=0.0)
             plt.grid(True, alpha=0.3)
             plt.xlim(left=0)
             plt.ylim(0, 1)
 
-            fig.tight_layout(rect=[0, 0, 0.85, 1])
+            fig.tight_layout(rect=[0, 0, 0.92, 1])
 
             if save_dir:
                 fig.savefig(
