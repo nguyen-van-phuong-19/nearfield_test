@@ -1,3 +1,4 @@
 venv/*
 nearfield_env/*
 demo_results*/*
+my_results/*
