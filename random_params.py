@@ -13,11 +13,20 @@ import numpy as np
 
 # Valid presets and modes should stay in-sync with
 # optimized_nearfield_system.create_system_with_presets/create_simulation_config
-VALID_PRESETS = ["standard", "high_freq", "large_array", "small_test"]
-VALID_MODES = ["fast", "standard", "comprehensive"]
+VALID_PRESETS = [
+    "standard",
+    "5g_sub6",
+    "5g_mmwave",
+    "6g_subthz",
+    "7g_thz",
+    "high_freq",
+    "large_array",
+    "small_test",
+]
+VALID_MODES = ["fast", "standard", "comprehensive", "massive"]
 
 
-def random_basic_params(users_min: int = 1, users_max: int = 20) -> Dict[str, object]:
+def random_basic_params(users_min: int = 1, users_max: int = 1000) -> Dict[str, object]:
     """Pick a valid random preset, mode, and user count.
 
     Args:
@@ -73,4 +82,3 @@ def apply_random_to_config(
         config.y_range = (min(y_lo, -2.0), max(y_hi, 2.0))
 
     return config
-

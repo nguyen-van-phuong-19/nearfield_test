@@ -94,7 +94,7 @@ class SimulationGUI:
 
         ttk.Label(control_frame, text="Users:").grid(row=2, column=0, sticky=tk.W, padx=(0, 6), pady=4)
         self.users_var = tk.IntVar(value=5)
-        self.users_spin = ttk.Spinbox(control_frame, from_=1, to=200, textvariable=self.users_var, width=8)
+        self.users_spin = ttk.Spinbox(control_frame, from_=1, to=1000, textvariable=self.users_var, width=8)
         self.users_spin.grid(row=2, column=1, sticky="w", pady=4)
 
         # Randomize option

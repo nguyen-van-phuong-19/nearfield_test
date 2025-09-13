@@ -7,6 +7,7 @@ import queue
 from typing import List
 
 from random_params import VALID_PRESETS, VALID_MODES, random_basic_params
+from config_loader import ConfigManager
 
 # Demo/experiment entry points
 from demo_script import (
@@ -20,6 +21,8 @@ from demo_script import (
 from research_workflow import run_random_quick_experiment
 from optimized_nearfield_system import create_system_with_presets, create_simulation_config
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from datetime import datetime
+import json
 import multiprocessing as mp
 import os
 
@@ -90,13 +93,58 @@ class MainSimulationGUI:
 
         ttk.Label(controls, text="Users:").grid(row=2, column=0, sticky=tk.W, padx=(0, 8), pady=4)
         self.users_var = tk.IntVar(value=5)
-        self.users_spin = ttk.Spinbox(controls, from_=1, to=200, textvariable=self.users_var, width=10)
+        self.users_spin = ttk.Spinbox(controls, from_=1, to=1000, textvariable=self.users_var, width=10)
         self.users_spin.grid(row=2, column=1, sticky="w", pady=4)
 
         self.randomize_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(controls, text="Randomize on Run", variable=self.randomize_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(6, 2))
 
+        # JSON profile selection
         ttk.Separator(controls).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+        ttk.Label(controls, text="JSON Profile:").grid(row=5, column=0, sticky=tk.W, padx=(0, 8), pady=(0, 4))
+        self.use_json_var = tk.BooleanVar(value=False)
+        self.cfg_manager = ConfigManager()
+        self.json_profiles = sorted(list(self.cfg_manager.sim_configs.keys()))
+        self.json_profile_var = tk.StringVar(value=self.json_profiles[0] if self.json_profiles else "")
+        self.json_cb = ttk.Combobox(controls, textvariable=self.json_profile_var, values=self.json_profiles, state="readonly")
+        self.json_cb.grid(row=5, column=1, sticky="ew", pady=(0, 4))
+        ttk.Checkbutton(controls, text="Use JSON profile", variable=self.use_json_var).grid(row=6, column=0, columnspan=2, sticky=tk.W)
+
+        # Advanced overrides
+        ttk.Separator(controls).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 6))
+        self.adv_var = tk.BooleanVar(value=False)
+        adv = ttk.Labelframe(controls, text="Advanced Overrides", padding=(8, 6))
+        adv.grid(row=8, column=0, columnspan=2, sticky="ew")
+        ttk.Checkbutton(adv, text="Enable Overrides", variable=self.adv_var).grid(row=0, column=0, columnspan=4, sticky=tk.W)
+        # z range & points
+        ttk.Label(adv, text="z_min").grid(row=1, column=0, sticky=tk.W, padx=(0,4))
+        ttk.Label(adv, text="z_max").grid(row=1, column=2, sticky=tk.W, padx=(8,4))
+        self.zmin_var = tk.DoubleVar(value=1.0)
+        self.zmax_var = tk.DoubleVar(value=200.0)
+        ttk.Entry(adv, textvariable=self.zmin_var, width=8).grid(row=1, column=1, sticky=tk.W)
+        ttk.Entry(adv, textvariable=self.zmax_var, width=8).grid(row=1, column=3, sticky=tk.W)
+        ttk.Label(adv, text="#z points").grid(row=2, column=0, sticky=tk.W, padx=(0,4))
+        ttk.Label(adv, text="#realizations/z").grid(row=2, column=2, sticky=tk.W, padx=(8,4))
+        self.nz_var = tk.IntVar(value=30)
+        self.nreal_var = tk.IntVar(value=100)
+        ttk.Entry(adv, textvariable=self.nz_var, width=8).grid(row=2, column=1, sticky=tk.W)
+        ttk.Entry(adv, textvariable=self.nreal_var, width=8).grid(row=2, column=3, sticky=tk.W)
+        # x/y ranges & n_jobs
+        ttk.Label(adv, text="x_min").grid(row=3, column=0, sticky=tk.W, padx=(0,4))
+        ttk.Label(adv, text="x_max").grid(row=3, column=2, sticky=tk.W, padx=(8,4))
+        self.xmin_var = tk.DoubleVar(value=-100.0)
+        self.xmax_var = tk.DoubleVar(value=100.0)
+        ttk.Entry(adv, textvariable=self.xmin_var, width=8).grid(row=3, column=1, sticky=tk.W)
+        ttk.Entry(adv, textvariable=self.xmax_var, width=8).grid(row=3, column=3, sticky=tk.W)
+        ttk.Label(adv, text="y_min").grid(row=4, column=0, sticky=tk.W, padx=(0,4))
+        ttk.Label(adv, text="y_max").grid(row=4, column=2, sticky=tk.W, padx=(8,4))
+        self.ymin_var = tk.DoubleVar(value=-100.0)
+        self.ymax_var = tk.DoubleVar(value=100.0)
+        ttk.Entry(adv, textvariable=self.ymin_var, width=8).grid(row=4, column=1, sticky=tk.W)
+        ttk.Entry(adv, textvariable=self.ymax_var, width=8).grid(row=4, column=3, sticky=tk.W)
+        ttk.Label(adv, text="n_jobs (-1=auto)").grid(row=5, column=0, sticky=tk.W, padx=(0,4))
+        self.njobs_var = tk.IntVar(value=-1)
+        ttk.Entry(adv, textvariable=self.njobs_var, width=8).grid(row=5, column=1, sticky=tk.W)
 
         # Tests selection
         tests_frame = ttk.Labelframe(controls, text="Select Tests", padding=(10, 8))
@@ -123,7 +171,7 @@ class MainSimulationGUI:
 
         # Run/Stop buttons
         action_row = ttk.Frame(controls)
-        action_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        action_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         action_row.grid_columnconfigure(0, weight=1)
         action_row.grid_columnconfigure(1, weight=1)
         action_row.grid_columnconfigure(2, weight=1)
@@ -279,14 +327,59 @@ class MainSimulationGUI:
                         demo_parameter_analysis()
                     
                     elif name == "Complete Simulation (AAG/AMAG)":
-                        # Use selected mode (recommend 'comprehensive' for large parameters)
-                        mode_sel = self.mode_var.get() or "comprehensive"
-                        self._append_log(f"Running complete simulation with mode={mode_sel}\n")
+                        # Build config from JSON profile or mode, then apply overrides if requested
                         sim = create_system_with_presets(preset)
-                        cfg = create_simulation_config(mode_sel)
+                        profile = None
+                        if self.use_json_var.get() and self.json_profiles:
+                            profile = self.json_profile_var.get()
+                            self._append_log(f"Using JSON profile: {profile}\n")
+                            cfg = self.cfg_manager.get_simulation_config(profile)
+                        else:
+                            mode_sel = self.mode_var.get() or "comprehensive"
+                            self._append_log(f"Running complete simulation with mode={mode_sel}\n")
+                            cfg = create_simulation_config(mode_sel)
+                        # Override users
                         if users is not None:
                             cfg.num_users_list = [users]
+                        # Apply advanced overrides
+                        if self.adv_var.get():
+                            try:
+                                zmin = float(self.zmin_var.get())
+                                zmax = float(self.zmax_var.get())
+                                nz = max(2, int(self.nz_var.get()))
+                                if zmax <= zmin:
+                                    zmax = zmin + 1.0
+                                cfg.z_values = np.linspace(zmin, zmax, nz)
+                                cfg.num_realizations = max(1, int(self.nreal_var.get()))
+                                cfg.x_range = (float(self.xmin_var.get()), float(self.xmax_var.get()))
+                                cfg.y_range = (float(self.ymin_var.get()), float(self.ymax_var.get()))
+                                cfg.n_jobs = int(self.njobs_var.get())
+                            except Exception as e:
+                                self._append_log(f"Override parse error: {e}\n")
                         res = sim.run_optimized_simulation(cfg)
+                        # Save results bundle (figures + pickle + config json)
+                        try:
+                            out_dir = f"my_results/full_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                            os.makedirs(out_dir, exist_ok=True)
+                            sim.plot_comprehensive_results(res, save_dir=out_dir)
+                            sim.save_results(res, f"{out_dir}/simulation_results.pkl")
+                            cfg_json = {
+                                "preset": preset,
+                                "source": ("json_profile" if profile else "mode"),
+                                "profile_or_mode": profile or (self.mode_var.get() or "comprehensive"),
+                                "num_users_list": list(getattr(cfg, 'num_users_list', [])),
+                                "z_values": list(map(float, getattr(cfg, 'z_values', []))),
+                                "num_realizations": int(getattr(cfg, 'num_realizations', 0)),
+                                "x_range": tuple(getattr(cfg, 'x_range', ())),
+                                "y_range": tuple(getattr(cfg, 'y_range', ())),
+                                "n_jobs": int(getattr(cfg, 'n_jobs', -1)),
+                            }
+                            with open(f"{out_dir}/config.json", "w", encoding="utf-8") as f:
+                                json.dump(cfg_json, f, indent=2)
+                            last_output = out_dir
+                            self._append_log(f"Results saved to: {out_dir}\n")
+                        except Exception as e:
+                            self._append_log(f"Save error: {e}\n")
                         # Show results and plots in tabs
                         try:
                             if not self._closing:

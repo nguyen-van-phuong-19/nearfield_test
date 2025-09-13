@@ -674,7 +674,15 @@ def create_system_with_presets(preset: str = "standard") -> OptimizedNearFieldBe
         Đối tượng ``OptimizedNearFieldBeamformingSimulator`` đã khởi tạo.
     """
     presets = {
+        # 5G class
         "standard": SystemParameters(M=32, N=32, lambda_=0.05, frequency=6e9),
+        "5g_sub6": SystemParameters(M=64, N=64, lambda_=0.05, frequency=3.5e9),  # sub‑6 GHz
+        "5g_mmwave": SystemParameters(M=64, N=64, lambda_=0.01, frequency=28e9),  # 28 GHz
+        # 6G class (sub‑THz)
+        "6g_subthz": SystemParameters(M=64, N=64, lambda_=0.003, frequency=100e9),  # ~100 GHz
+        # 7G future (THz band, illustrative)
+        "7g_thz": SystemParameters(M=64, N=64, lambda_=0.001, frequency=300e9),  # 300 GHz
+        # Legacy presets
         "high_freq": SystemParameters(M=32, N=32, lambda_=0.01, frequency=30e9),  # mmWave
         "large_array": SystemParameters(M=64, N=64, lambda_=0.05, frequency=6e9),
         "small_test": SystemParameters(M=16, N=16, lambda_=0.05, frequency=6e9),
@@ -711,6 +719,15 @@ def create_simulation_config(mode: str = "fast") -> SimulationConfig:
             num_users_list=[5, 10, 20],
             z_values=np.linspace(0.1, 200, 30),
             num_realizations=100,
+            n_jobs=-1
+        ),
+        # Massive / large-parameter run: big square, up to 1000 users
+        "massive": SimulationConfig(
+            num_users_list=[50, 100, 200, 500, 1000],
+            z_values=np.linspace(1, 500, 40),
+            num_realizations=80,
+            x_range=(-100.0, 100.0),
+            y_range=(-100.0, 100.0),
             n_jobs=-1
         )
     }
