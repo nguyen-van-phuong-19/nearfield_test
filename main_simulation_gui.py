@@ -20,6 +20,8 @@ from demo_script import (
 from research_workflow import run_random_quick_experiment
 from optimized_nearfield_system import create_system_with_presets
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import multiprocessing as mp
+import os
 
 
 class _ToolTip:
@@ -124,10 +126,14 @@ class MainSimulationGUI:
         action_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         action_row.grid_columnconfigure(0, weight=1)
         action_row.grid_columnconfigure(1, weight=1)
+        action_row.grid_columnconfigure(2, weight=1)
         self.run_btn = ttk.Button(action_row, text="Run", style="Accent.TButton", command=self.run_selected)
         self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.cancel_btn = ttk.Button(action_row, text="Cancel Run", command=lambda: self._cancel_run())
+        self.cancel_btn.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        self.cancel_btn.state(["disabled"])  # enabled during a run
         self.stop_btn = ttk.Button(action_row, text="Close", command=root.destroy)
-        self.stop_btn.grid(row=0, column=1, sticky="ew")
+        self.stop_btn.grid(row=0, column=2, sticky="ew")
 
         # Right: notebook (Activity / Plots / Summary) and status
         right = ttk.Frame(paned, padding=(4, 4))
@@ -192,7 +198,7 @@ class MainSimulationGUI:
 
         # Queue to capture printed output from worker threads
         self._msg_queue: queue.Queue = queue.Queue()
-        self.root.after(100, self._poll_queue)
+        self._after_poll_id = self.root.after(100, self._poll_queue)
 
         # Tooltips
         for w, t in [
@@ -259,6 +265,8 @@ class MainSimulationGUI:
                     plt.show = lambda *a, **k: None
                 except Exception:
                     _orig_show = None
+                # Cancellation event shared with simulation processes
+                self._stop_event = mp.Event()
                 for name in selected:
                     t0 = time.perf_counter()
                     if self._closing:
@@ -339,10 +347,12 @@ class MainSimulationGUI:
                     self.progress.start(10)
                     self.status_var.set("Running...")
                     self.run_btn.state(["disabled"]) 
+                    self.cancel_btn.state(["!disabled"]) 
                 else:
                     self.progress.stop()
                     self.status_var.set("Ready.")
                     self.run_btn.state(["!disabled"]) 
+                    self.cancel_btn.state(["disabled"]) 
             except Exception:
                 pass
         self.root.after(0, _do)
@@ -445,6 +455,16 @@ class MainSimulationGUI:
     def _on_close(self) -> None:
         self._closing = True
         try:
+            if hasattr(self, '_stop_event') and self._stop_event is not None:
+                self._stop_event.set()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_after_poll_id') and self._after_poll_id is not None:
+                self.root.after_cancel(self._after_poll_id)
+        except Exception:
+            pass
+        try:
             self.root.destroy()
         except Exception:
             pass
@@ -463,7 +483,20 @@ class MainSimulationGUI:
         except queue.Empty:
             pass
         if not self._closing:
-            self.root.after(100, self._poll_queue)
+            try:
+                if self.root.winfo_exists():
+                    self._after_poll_id = self.root.after(100, self._poll_queue)
+            except Exception:
+                pass
+
+    def _cancel_run(self) -> None:
+        try:
+            if hasattr(self, '_stop_event') and self._stop_event is not None:
+                self._stop_event.set()
+                self._append_log("Cancelling run...\n")
+                self._schedule_status("Cancelling...")
+        except Exception:
+            pass
 
     def _build_summary_text(self, simulation_results) -> str:
         import numpy as np

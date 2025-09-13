@@ -181,7 +181,7 @@ class SimulationGUI:
 
         # Thread-safe message queue and poller
         self._msg_queue: queue.Queue = queue.Queue()
-        self.root.after(100, self._poll_queue)
+        self._after_poll_id = self.root.after(100, self._poll_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def run_simulation(self) -> None:
@@ -387,11 +387,20 @@ class SimulationGUI:
         except queue.Empty:
             pass
         # Schedule next poll
-        self.root.after(100, self._poll_queue)
+        try:
+            if not self._closing and self.root.winfo_exists():
+                self._after_poll_id = self.root.after(100, self._poll_queue)
+        except Exception:
+            pass
 
     def _on_close(self) -> None:
         # Mark closing to stop scheduling
         self._closing = True
+        try:
+            if hasattr(self, '_after_poll_id') and self._after_poll_id is not None:
+                self.root.after_cancel(self._after_poll_id)
+        except Exception:
+            pass
         try:
             self.root.destroy()
         except Exception:

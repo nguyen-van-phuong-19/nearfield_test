@@ -34,8 +34,13 @@ def _process_z_batch(args):
     simulator, z, num_users, config = args
     # Different random seed for each process to avoid correlated results
     np.random.seed(int(time.time() * 1000) % 2**32)
+    # Cooperative cancellation
+    if hasattr(config, 'stop_event') and (config.stop_event is not None) and config.stop_event.is_set():
+        return z, []
     z_results = []
     for _ in range(config.num_realizations):
+        if hasattr(config, 'stop_event') and (config.stop_event is not None) and config.stop_event.is_set():
+            break
         result = simulator.process_single_realization_optimized(z, num_users, config)
         z_results.append(result)
     return z, z_results
@@ -81,6 +86,7 @@ class SimulationConfig:
     x_range: Tuple[float, float] = (-10.0, 10.0)
     y_range: Tuple[float, float] = (-10.0, 10.0)
     n_jobs: int = -1
+    stop_event: Optional[mp.Event] = None
 
     def __post_init__(self):
         if self.num_users_list is None:
@@ -391,6 +397,14 @@ class OptimizedNearFieldBeamformingSimulator:
 
             with ProcessPoolExecutor(max_workers=n_jobs) as executor:
                 for z, z_results in executor.map(_process_z_batch, args_iterable, chunksize=1):
+                    # Cooperative cancellation and empty batches
+                    try:
+                        if getattr(config, 'stop_event', None) is not None and config.stop_event.is_set():
+                            break
+                    except Exception:
+                        pass
+                    if not z_results:
+                        continue
                     if method_names is None:
                         method_names = list(z_results[0].keys())
                         for method in method_names:
