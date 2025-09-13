@@ -130,22 +130,22 @@ class SimulationGUI:
         self.summary_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.plots_tab, text="Plots")
         self.notebook.add(self.summary_tab, text="Summary")
-        # Scrollable plots area
+        # Scrollable plots area with proper grid so scrollbars span full tab
+        self.plots_tab.grid_columnconfigure(0, weight=1)
+        self.plots_tab.grid_rowconfigure(0, weight=1)
         self.plots_canvas = tk.Canvas(self.plots_tab, highlightthickness=0)
-        self.plots_scroll = ttk.Scrollbar(self.plots_tab, orient="vertical", command=self.plots_canvas.yview)
-        self.plots_canvas.configure(yscrollcommand=self.plots_scroll.set)
+        self.plots_vscroll = ttk.Scrollbar(self.plots_tab, orient="vertical", command=self.plots_canvas.yview)
+        self.plots_hscroll = ttk.Scrollbar(self.plots_tab, orient="horizontal", command=self.plots_canvas.xview)
+        self.plots_canvas.configure(yscrollcommand=self.plots_vscroll.set, xscrollcommand=self.plots_hscroll.set)
+        self.plots_canvas.grid(row=0, column=0, sticky="nsew")
+        self.plots_vscroll.grid(row=0, column=1, sticky="ns")
+        self.plots_hscroll.grid(row=1, column=0, sticky="ew")
         self.plots_container = ttk.Frame(self.plots_canvas)
+        self._plots_window = self.plots_canvas.create_window((0, 0), window=self.plots_container, anchor="nw")
         self.plots_container.bind(
             "<Configure>",
             lambda e: self.plots_canvas.configure(scrollregion=self.plots_canvas.bbox("all")),
         )
-        self._plots_window = self.plots_canvas.create_window((0, 0), window=self.plots_container, anchor="nw")
-        self.plots_canvas.bind(
-            "<Configure>",
-            lambda e: self.plots_canvas.itemconfigure(self._plots_window, width=e.width),
-        )
-        self.plots_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.plots_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         # Summary text area with scrollbar
         self.summary_text = tk.Text(self.summary_tab, wrap="word", height=12)
         self.summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -239,7 +239,7 @@ class SimulationGUI:
         for fig in figures:
             canvas = FigureCanvasTkAgg(fig, master=self.plots_container)
             canvas.draw()
-            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(2, 6))
+            canvas.get_tk_widget().pack(side=tk.TOP, anchor='nw', pady=(2, 6))
         # Restore plt.show
         try:
             if _orig_show is not None:

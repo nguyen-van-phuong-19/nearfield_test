@@ -18,7 +18,7 @@ from demo_script import (
     demo_gui_error_check,
 )
 from research_workflow import run_random_quick_experiment
-from optimized_nearfield_system import create_system_with_presets
+from optimized_nearfield_system import create_system_with_presets, create_simulation_config
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import multiprocessing as mp
 import os
@@ -105,7 +105,7 @@ class MainSimulationGUI:
         self.test_vars = {
             "Basic Functionality": tk.BooleanVar(value=False),
             "Parameter Analysis": tk.BooleanVar(value=False),
-            "Fast Simulation": tk.BooleanVar(value=True),
+            "Complete Simulation (AAG/AMAG)": tk.BooleanVar(value=True),
             "Comparison Analysis": tk.BooleanVar(value=False),
             "Performance Benchmark": tk.BooleanVar(value=False),
             "GUI Smoke Test": tk.BooleanVar(value=False),
@@ -152,25 +152,25 @@ class MainSimulationGUI:
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log.configure(yscrollcommand=yscroll.set, state="disabled")
 
-        # Plots tab (scrollable)
+        # Plots tab (scrollable with both axes) using a proper grid layout so bars span the area
         self.plots_tab = ttk.Frame(self.nb)
         self.nb.add(self.plots_tab, text="Plots")
-        # Canvas + inner frame for scrollable plots
+        self.plots_tab.grid_columnconfigure(0, weight=1)
+        self.plots_tab.grid_rowconfigure(0, weight=1)
         self.plots_canvas = tk.Canvas(self.plots_tab, highlightthickness=0)
-        self.plots_scroll = ttk.Scrollbar(self.plots_tab, orient="vertical", command=self.plots_canvas.yview)
-        self.plots_canvas.configure(yscrollcommand=self.plots_scroll.set)
+        self.plots_vscroll = ttk.Scrollbar(self.plots_tab, orient="vertical", command=self.plots_canvas.yview)
+        self.plots_hscroll = ttk.Scrollbar(self.plots_tab, orient="horizontal", command=self.plots_canvas.xview)
+        self.plots_canvas.configure(yscrollcommand=self.plots_vscroll.set, xscrollcommand=self.plots_hscroll.set)
+        self.plots_canvas.grid(row=0, column=0, sticky="nsew")
+        self.plots_vscroll.grid(row=0, column=1, sticky="ns")
+        self.plots_hscroll.grid(row=1, column=0, sticky="ew")
+        # Inner container attached to canvas (native figure sizes; scrolling handles overflow)
         self.plots_container = ttk.Frame(self.plots_canvas)
+        self._plots_window = self.plots_canvas.create_window((0, 0), window=self.plots_container, anchor="nw")
         self.plots_container.bind(
             "<Configure>",
             lambda e: self.plots_canvas.configure(scrollregion=self.plots_canvas.bbox("all")),
         )
-        self._plots_window = self.plots_canvas.create_window((0, 0), window=self.plots_container, anchor="nw")
-        self.plots_canvas.bind(
-            "<Configure>",
-            lambda e: self.plots_canvas.itemconfigure(self._plots_window, width=e.width),
-        )
-        self.plots_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.plots_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._fig_canvases = []
 
         # Summary tab
@@ -277,16 +277,20 @@ class MainSimulationGUI:
                         demo_basic_functionality()
                     elif name == "Parameter Analysis":
                         demo_parameter_analysis()
-                    elif name == "Fast Simulation": 
-                        _res, out_dir = demo_fast_simulation(preset=preset, mode=mode, users=users) 
-                        last_output = out_dir 
-                        if self._closing:
-                            break
-                        self._append_log(f"Saved results to: {out_dir}\n") 
+                    
+                    elif name == "Complete Simulation (AAG/AMAG)":
+                        # Use selected mode (recommend 'comprehensive' for large parameters)
+                        mode_sel = self.mode_var.get() or "comprehensive"
+                        self._append_log(f"Running complete simulation with mode={mode_sel}\n")
+                        sim = create_system_with_presets(preset)
+                        cfg = create_simulation_config(mode_sel)
+                        if users is not None:
+                            cfg.num_users_list = [users]
+                        res = sim.run_optimized_simulation(cfg)
                         # Show results and plots in tabs
                         try:
                             if not self._closing:
-                                self.root.after(0, lambda p=preset, r=_res, d=out_dir: self._update_results_view(p, r, d))
+                                self.root.after(0, lambda p=preset, r=res: self._update_results_view(p, r, None))
                         except Exception:
                             pass
                     elif name == "Comparison Analysis":
@@ -440,7 +444,8 @@ class MainSimulationGUI:
         for fig in figs:
             canvas = FigureCanvasTkAgg(fig, master=self.plots_container)
             canvas.draw()
-            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(2, 6))
+            # Pack without expansion to preserve native size; scrolling shows overflow
+            canvas.get_tk_widget().pack(side=tk.TOP, anchor='nw', pady=(2, 6))
             self._fig_canvases.append(canvas)
 
         # Update textual summary

@@ -11,6 +11,7 @@ from scipy import signal
 import pickle
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
+import random
 
 warnings.filterwarnings('ignore')
 
@@ -718,6 +719,150 @@ def create_simulation_config(mode: str = "fast") -> SimulationConfig:
         raise ValueError(f"Unknown mode: {mode}. Available: {list(configs.keys())}")
     
     return configs[mode]
+
+# ================== PARAMETER INPUT AND RANDOMIZATION HELPERS ==================
+
+def randomize_system_parameters(seed: Optional[int] = None) -> SystemParameters:
+    """Create a randomized but valid ``SystemParameters`` object.
+
+    The choices keep sensible bounds and default to ``d=lambda_/2``.
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    # Reasonable LIS sizes and carrier pairs
+    M = random.choice([16, 24, 32, 48, 64])
+    N = random.choice([16, 24, 32, 48, 64])
+    # Pick lambda/frequency pairs similar to presets (consistency over exact c=f*lambda)
+    if random.random() < 0.5:
+        lambda_ = 0.05
+        frequency = 6e9
+    else:
+        lambda_ = 0.01
+        frequency = 30e9
+
+    return SystemParameters(M=M, N=N, lambda_=lambda_, frequency=frequency)
+
+
+def randomize_simulation_config(seed: Optional[int] = None) -> SimulationConfig:
+    """Create a randomized ``SimulationConfig`` within safe bounds.
+
+    - Users: one scenario chosen from 1..50
+    - z-range: 0.1–200 m with 10–30 points
+    - Realizations: 10–100 (biased to moderate values)
+    - x/y ranges: within [-10, 10]
+    """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    users = random.choice([1, 3, 5, 8, 10, 20, 30, 50])
+    z_min = round(random.uniform(0.1, 20.0), 1)
+    z_max = round(random.uniform(80.0, 200.0), 1)
+    if z_max <= z_min:
+        z_min, z_max = 0.1, 200.0
+    num_points = random.choice([10, 12, 15, 20, 24, 30])
+    num_realizations = random.choice([10, 20, 30, 50, 80, 100])
+
+    # Keep user lateral spread inside a 20x20 square, non-degenerate
+    x_lo = round(random.uniform(-10.0, -2.0), 1)
+    x_hi = round(random.uniform(2.0, 10.0), 1)
+    y_lo = round(random.uniform(-10.0, -2.0), 1)
+    y_hi = round(random.uniform(2.0, 10.0), 1)
+
+    return SimulationConfig(
+        num_users_list=[users],
+        z_values=np.linspace(z_min, z_max, num_points),
+        num_realizations=num_realizations,
+        x_range=(min(x_lo, -2.0), max(x_hi, 2.0)),
+        y_range=(min(y_lo, -2.0), max(y_hi, 2.0)),
+        n_jobs=-1,
+    )
+
+
+def input_system_parameters(default: Optional[SystemParameters] = None) -> SystemParameters:
+    """Interactive prompt to enter system parameters.
+
+    Press Enter to keep defaults; enter "r" at the first prompt to randomize.
+    """
+    if default is None:
+        default = SystemParameters()
+
+    print("\n=== Enter System Parameters (r=randomize) ===")
+    first = input(f"M rows [{default.M}]: ").strip()
+    if first.lower() == "r":
+        return randomize_system_parameters()
+    def _int(inp, fallback):
+        try:
+            return int(inp) if inp else fallback
+        except Exception:
+            return fallback
+    def _float(inp, fallback):
+        try:
+            return float(inp) if inp else fallback
+        except Exception:
+            return fallback
+
+    M = _int(first, default.M)
+    N = _int(input(f"N cols [{default.N}]: ").strip(), default.N)
+    lambda_ = _float(input(f"Wavelength lambda (m) [{default.lambda_}]: ").strip(), default.lambda_)
+    frequency = _float(input(f"Carrier frequency (Hz) [{default.frequency}]: ").strip(), default.frequency)
+    d_in = input(f"Element spacing d (m) [lambda/2={lambda_/2:.4f}]: ").strip()
+    if d_in:
+        d_val = _float(d_in, lambda_/2)
+    else:
+        d_val = lambda_/2
+    return SystemParameters(M=M, N=N, lambda_=lambda_, frequency=frequency, d=d_val)
+
+
+def input_simulation_config(default: Optional[SimulationConfig] = None) -> SimulationConfig:
+    """Interactive prompt to enter simulation configuration.
+
+    Press Enter to keep defaults; enter "r" at the first prompt to randomize.
+    """
+    if default is None:
+        default = SimulationConfig()
+    print("\n=== Enter Simulation Config (r=randomize) ===")
+    first = input(f"Users (single int) [{default.num_users_list[0]}]: ").strip()
+    if first.lower() == "r":
+        return randomize_simulation_config()
+    def _int(inp, fallback):
+        try:
+            return int(inp) if inp else fallback
+        except Exception:
+            return fallback
+    def _float(inp, fallback):
+        try:
+            return float(inp) if inp else fallback
+        except Exception:
+            return fallback
+
+    users = _int(first, default.num_users_list[0])
+    zmin = _float(input(f"z_min (m) [{float(default.z_values[0]):.1f}]: ").strip(), float(default.z_values[0]))
+    zmax = _float(input(f"z_max (m) [{float(default.z_values[-1]):.1f}]: ").strip(), float(default.z_values[-1]))
+    nz = _int(input(f"num z points [{len(default.z_values)}]: ").strip(), len(default.z_values))
+    nreal = _int(input(f"num realizations/z [{default.num_realizations}]: ").strip(), default.num_realizations)
+    xlo = _float(input(f"x_min [{default.x_range[0]}]: ").strip(), default.x_range[0])
+    xhi = _float(input(f"x_max [{default.x_range[1]}]: ").strip(), default.x_range[1])
+    ylo = _float(input(f"y_min [{default.y_range[0]}]: ").strip(), default.y_range[0])
+    yhi = _float(input(f"y_max [{default.y_range[1]}]: ").strip(), default.y_range[1])
+    n_jobs = _int(input(f"n_jobs (-1=auto) [{default.n_jobs}]: ").strip(), default.n_jobs)
+
+    if zmax <= zmin:
+        zmin, zmax = zmin, zmin + 1.0
+    if nz < 2:
+        nz = 2
+    x_range = (min(xlo, xhi), max(xlo, xhi))
+    y_range = (min(ylo, yhi), max(ylo, yhi))
+
+    return SimulationConfig(
+        num_users_list=[max(1, users)],
+        z_values=np.linspace(zmin, zmax, nz),
+        num_realizations=max(1, nreal),
+        x_range=x_range,
+        y_range=y_range,
+        n_jobs=n_jobs,
+    )
 
 # ================== FUTURE RESEARCH EXTENSIONS ==================
 
