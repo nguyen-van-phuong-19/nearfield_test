@@ -1428,13 +1428,13 @@ class MainSimulationGUI:
         self.status_var = tk.StringVar(value="Ready.") 
         ttk.Label(status, textvariable=self.status_var).pack(side=tk.RIGHT) 
 
-        # Add panes: make right expand; left has a minimum width
-        paned.add(self._pane_left, weight=0)
-        paned.add(right, weight=1)
         try:
-            paned.pane(self._pane_left, minsize=420)
+            paned.add(self._pane_left, weight=0)
+            paned.add(right, weight=1)
+            paned.paneconfigure(self._pane_left, minsize=420)
         except Exception:
-            pass
+            paned.add(self._pane_left)
+            paned.add(right)
 
         # Ensure left scroll region is up to date
         try:

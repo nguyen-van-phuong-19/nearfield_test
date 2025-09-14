@@ -1,0 +1,2736 @@
+diff --git a/examples/adv_aag_amg_demo.py b/examples/adv_aag_amg_demo.py
+new file mode 100644
+index 0000000..4e2489c
+--- /dev/null
++++ b/examples/adv_aag_amg_demo.py
+@@ -0,0 +1,66 @@
++import numpy as np
++from nearfield.heatmaps import (
++    make_theta_phi_grid,
++    build_steering_on_angular_slice,
++)
++from nearfield.metrics_aag_amg import per_point_gains
++from nearfield.plotting_interactive import heatmap_theta_phi
++import plotly.io as pio
++
++
++SPEED_OF_LIGHT = 299_792_458.0
++
++
++def make_array(layout: str, nx: int, ny: int, dx: float, dy: float) -> np.ndarray:
++    layout = layout.lower()
++    if layout == "ula":
++        ny = 1
++    xs = (np.arange(nx) - (nx - 1) / 2.0) * dx
++    ys = (np.arange(ny) - (ny - 1) / 2.0) * (dy if layout == "upa" else 0.0)
++    xv, yv = np.meshgrid(xs, ys, indexing="xy")
++    M = nx * ny
++    xyz = np.zeros((M, 3), dtype=np.float64)
++    xyz[:, 0] = xv.reshape(-1)
++    xyz[:, 1] = yv.reshape(-1)
++    return xyz
++
++
++def main():
++    nx = ny = 32
++    dx = dy = 0.5 * (SPEED_OF_LIGHT / 28e9)
++    xyz = make_array("upa", nx, ny, dx, dy)
++    fc = 28e9
++    r_fixed = 8.0
++    theta = np.arange(-60, 60 + 3, 3, dtype=np.float64)
++    phi = np.arange(-30, 30 + 3, 3, dtype=np.float64)
++    grid = make_theta_phi_grid(theta, phi)
++    A = build_steering_on_angular_slice(xyz, fc, r_fixed, grid)
++
++    # AMAG map (ideal) -> equals 0 dB if steering rows are unit-norm
++    amag_db = 10.0 * np.log10(np.maximum(np.sum(np.abs(A) ** 2, axis=1), 1e-12))
++
++    # Codebook-selected AAG: use a coarser angular grid as codebook
++    theta_cb = np.arange(-60, 60 + 6, 6, dtype=np.float64)
++    phi_cb = np.arange(-30, 30 + 6, 6, dtype=np.float64)
++    cb_grid = make_theta_phi_grid(theta_cb, phi_cb)
++    C = build_steering_on_angular_slice(xyz, fc, r_fixed, cb_grid)
++    # For each a in A, select best codeword
++    sims = A @ np.conjugate(C.T)  # (P,Nc)
++    idx = np.argmax(np.abs(sims), axis=1)
++    W = C[idx]  # (P,M)
++    aag_db = per_point_gains(W, A, mode="db")
++    loss_db = amag_db - aag_db
++
++    # Plot and export
++    fig1 = heatmap_theta_phi(theta, phi, amag_db.reshape(len(phi), len(theta)), "AMAG (dB)")
++    fig2 = heatmap_theta_phi(theta, phi, aag_db.reshape(len(phi), len(theta)), "AAG (dB, codebook-selected)")
++    fig3 = heatmap_theta_phi(theta, phi, loss_db.reshape(len(phi), len(theta)), "Loss (AMAG - AAG) dB")
++    pio.write_html(fig1, file="adv_maps_amag.html", include_plotlyjs="cdn", auto_open=False)
++    pio.write_html(fig2, file="adv_maps_aag.html", include_plotlyjs="cdn", auto_open=False)
++    pio.write_html(fig3, file="adv_maps_loss.html", include_plotlyjs="cdn", auto_open=False)
++    print("Saved adv_maps_*.html")
++
++
++if __name__ == "__main__":
++    main()
++
+diff --git a/main_simulation_gui.py b/main_simulation_gui.py
+index 682d939..93807fb 100644
+--- a/main_simulation_gui.py
++++ b/main_simulation_gui.py
+@@ -1,15 +1,17 @@
+ import tkinter as tk
+-from tkinter import ttk, filedialog
++from tkinter import ttk, filedialog, messagebox
+ import threading
+ import time
+ import sys
+ import queue
+-from typing import List, Optional
+-from dataclasses import dataclass
++from typing import List, Optional, Callable, Any
++from dataclasses import dataclass, field
+ import json
+ import os
+ import multiprocessing as mp
+ import numpy as np
++import math
++import traceback
+ 
+ from random_params import VALID_PRESETS, VALID_MODES, random_basic_params
+ from config_loader import ConfigManager
+@@ -25,9 +27,1090 @@ from demo_script import (
+ )
+ from research_workflow import run_random_quick_experiment
+ from optimized_nearfield_system import create_system_with_presets, create_simulation_config
+-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
++from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+ from datetime import datetime
+ 
++# Optional HDF5 support
++try:  # pragma: no cover - optional
++    import h5py  # type: ignore
++except Exception:  # pragma: no cover - optional
++    h5py = None
++try:  # pragma: no cover - optional
++    import plotly.io as pio  # type: ignore
++    import plotly.graph_objects as go  # type: ignore
++except Exception:  # pragma: no cover - optional
++    pio = None
++    go = None
++
++# Nearfield helpers for advanced maps
++try:
++    from nearfield.heatmaps import (
++        make_theta_phi_grid,
++        build_steering_on_angular_slice,
++        build_steering_on_radial_slice,
++    )
++    from nearfield.metrics_aag_amg import per_point_gains
++    from nearfield.plotting_interactive import (
++        heatmap_theta_phi as plotly_heatmap_theta_phi,
++        surface_theta_phi as plotly_surface_theta_phi,
++        line_radial_slice as plotly_line_radial_slice,
++    )
++except Exception:
++    # Modules may not be present during partial installs; GUI still loads.
++    make_theta_phi_grid = None  # type: ignore
++    build_steering_on_angular_slice = None  # type: ignore
++    build_steering_on_radial_slice = None  # type: ignore
++    per_point_gains = None  # type: ignore
++    plotly_heatmap_theta_phi = None  # type: ignore
++    plotly_surface_theta_phi = None  # type: ignore
++    plotly_line_radial_slice = None  # type: ignore
++
++# --- Physical constants ---
++SPEED_OF_LIGHT = 299_792_458.0
++
++
++# ============= Minimal math/helpers for near-field experiments =============
++def rtp_to_xyz(r: float, theta_deg: float, phi_deg: float) -> np.ndarray:
++    """Convert spherical (r, theta_deg=azimuth, phi_deg=elevation) to XYZ in meters.
++
++    theta: azimuth in degrees, phi: elevation in degrees.
++    x = r cos(phi) cos(theta); y = r cos(phi) sin(theta); z = r sin(phi)
++    """
++    th = math.radians(float(theta_deg))
++    ph = math.radians(float(phi_deg))
++    cph = math.cos(ph)
++    return np.array([
++        r * cph * math.cos(th),
++        r * cph * math.sin(th),
++        r * math.sin(ph),
++    ], dtype=np.float64)
++
++
++def make_array(layout: str, num_x: int, num_y: int, dx: float, dy: float) -> np.ndarray:
++    """Create array element positions for UPA/ULA centered at origin.
++
++    layout: 'upa' or 'ula'
++    Returns array of shape (M, 3)
++    """
++    layout = (layout or "upa").lower()
++    num_x = int(max(1, num_x))
++    num_y = int(max(1, num_y))
++    dx = float(dx)
++    dy = float(dy)
++    if dx <= 0 or dy <= 0:
++        raise ValueError("dx/dy must be > 0")
++    if layout not in {"upa", "ula"}:
++        raise ValueError("layout must be 'upa' or 'ula'")
++    if layout == "ula":
++        num_y = 1
++        dy = 1.0  # unused
++
++    xs = (np.arange(num_x, dtype=np.float64) - (num_x - 1) / 2.0) * dx
++    ys = (np.arange(num_y, dtype=np.float64) - (num_y - 1) / 2.0) * (dy if layout == "upa" else 0.0)
++    xv, yv = np.meshgrid(xs, ys, indexing="xy")
++    M = num_x * num_y
++    xyz = np.zeros((M, 3), dtype=np.float64)
++    xyz[:, 0] = xv.reshape(-1)
++    xyz[:, 1] = yv.reshape(-1)
++    # z=0 plane
++    # Validate uniqueness
++    if np.unique(np.round(xyz, 9), axis=0).shape[0] != xyz.shape[0]:
++        raise ValueError("Array has duplicate element positions")
++    return xyz
++
++
++def _spherical_steering_vector(xyz_m: np.ndarray, p_xyz: np.ndarray, fc_hz: float) -> np.ndarray:
++    """Near-field narrowband steering at point p for carrier fc (complex, unit-norm)."""
++    lam = SPEED_OF_LIGHT / float(fc_hz)
++    k = 2.0 * math.pi / lam
++    d = np.linalg.norm(p_xyz[None, :] - xyz_m, axis=1)
++    a = np.exp(-1j * k * d)
++    # normalize to unit norm
++    a = a / (np.linalg.norm(a) + 1e-12)
++    return a.astype(np.complex128)
++
++
++def _far_field_steering_vector(xyz_m: np.ndarray, theta_deg: float, phi_deg: float, fc_hz: float) -> np.ndarray:
++    """Plane-wave steering for direction (theta, phi) at fc (unit-norm)."""
++    lam = SPEED_OF_LIGHT / float(fc_hz)
++    k = 2.0 * math.pi / lam
++    th = math.radians(theta_deg)
++    ph = math.radians(phi_deg)
++    u = np.array([math.cos(ph) * math.cos(th), math.cos(ph) * math.sin(th), math.sin(ph)], dtype=np.float64)
++    phase = -k * (xyz_m @ u)
++    a = np.exp(1j * phase)
++    a = a / (np.linalg.norm(a) + 1e-12)
++    return a.astype(np.complex128)
++
++
++def _wideband_steering_vector(xyz_m: np.ndarray, p_xyz: np.ndarray, f_hz: float) -> np.ndarray:
++    """Wideband steering per subcarrier frequency f."""
++    tau = np.linalg.norm(p_xyz[None, :] - xyz_m, axis=1) / SPEED_OF_LIGHT
++    a = np.exp(-1j * 2.0 * math.pi * float(f_hz) * tau)
++    a = a / (np.linalg.norm(a) + 1e-12)
++    return a.astype(np.complex128)
++
++
++def _gain(w: np.ndarray, a: np.ndarray) -> float:
++    """Focusing gain |w^H a|^2 / ||w||^2"""
++    num = np.abs(np.vdot(w, a)) ** 2
++    den = (np.linalg.norm(w) ** 2) + 1e-12
++    return float(num / den)
++
++
++# ============= Config/Controller for experiments =============
++@dataclass
++class RunConfig:
++    """Aggregated configuration for experiments and overrides."""
++    # Global overrides
++    n_jobs: int = -1
++    seed: Optional[int] = None
++    log_level: str = "INFO"
++
++    # Experiment selections
++    do_build_codebook: bool = False
++    do_eval_codebook: bool = False
++    do_wideband_ttd_vs_phase: bool = False
++
++    # Array params (shared)
++    layout: str = "upa"
++    num_x: int = 8
++    num_y: int = 8
++    dx_m: float = 0.005
++    dy_m: float = 0.005
++
++    # Spherical Codebook params
++    fc_hz: float = 28e9
++    r_min: float = 1.0
++    r_max: float = 10.0
++    r_step: float = 0.5
++    theta_start: float = -60.0
++    theta_stop: float = 60.0
++    theta_step: float = 5.0
++    phi_start: float = -20.0
++    phi_stop: float = 20.0
++    phi_step: float = 5.0
++    chunk: int = 2048
++    out_codebook_path: str | None = None
++
++    # Evaluate Codebook Mismatch
++    Q: int = 200
++    x_min: float = -2.0
++    x_max: float = 2.0
++    y_min: float = -2.0
++    y_max: float = 2.0
++    z_min: float = 1.0
++    z_max: float = 5.0
++    compare_ff: bool = False
++    in_codebook_path: str | None = None
++    save_eval_csv: bool = False
++    save_eval_png: bool = False
++    save_eval_html: bool = False
++
++    # Wideband TTD vs Phase
++    wb_fc_hz: float = 28e9
++    wb_bw_hz: float = 1e9
++    wb_n_sc: int = 64
++    focus_r: float = 2.0
++    focus_theta_deg: float = 0.0
++    focus_phi_deg: float = 0.0
++    save_wb_png: bool = False
++    save_wb_json: bool = False
++    save_wb_html: bool = False
++
++    # Advanced AAG/AMAG maps
++    do_adv_maps: bool = False
++    adv_map_type: str = "Angular 2D (╬╕ΓÇô╧ò @ r)"  # or "Radial Slice (r @ ╬╕,╧ò)"
++    adv_fc_hz: float = 28e9
++    adv_layout: str = "upa"
++    adv_num_x: int = 8
++    adv_num_y: int = 8
++    adv_dx_m: float = 0.005
++    adv_dy_m: float = 0.005
++    adv_r_fixed_m: float = 5.0
++    adv_theta_start: float = -60.0
++    adv_theta_stop: float = 60.0
++    adv_theta_step: float = 5.0
++    adv_phi_start: float = -20.0
++    adv_phi_stop: float = 20.0
++    adv_phi_step: float = 5.0
++    adv_r_min: float = 1.0
++    adv_r_max: float = 10.0
++    adv_r_step: float = 0.5
++    adv_theta_deg: float = 0.0
++    adv_phi_deg: float = 0.0
++    adv_weighting: str = "Ideal (AMAG)"  # or "Codebook-selected (AAG)"
++    adv_compare_ff: bool = False
++    adv_use_inmem_cb: bool = True
++    adv_cb_path: str | None = None
++    adv_save_html: bool = True
++    adv_save_csv: bool = False
++    adv_save_png: bool = False
++    adv_chunk: int = 2048
++
++    # Computed/optional
++    callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
++    cancel_flag: Optional[threading.Event] = None
++
++
++class ExperimentController:
++    """Controller to orchestrate experiment runs and GUI callbacks."""
++    def __init__(self, gui: "MainSimulationGUI") -> None:
++        self.gui = gui
++        self.cancel_flag = threading.Event()
++        self._last_codebook_result: Optional[dict[str, Any]] = None
++
++    def read_ui(self) -> RunConfig:
++        cfg = RunConfig()
++        # Advanced overrides (experiments)
++        try:
++            cfg.n_jobs = int(self.gui.exp_njobs_var.get())
++            seed_val = self.gui.exp_seed_var.get().strip()
++            cfg.seed = int(seed_val) if seed_val else None
++            cfg.log_level = self.gui.exp_loglevel_var.get() or "INFO"
++        except Exception:
++            pass
++
++        # Selections
++        cfg.do_build_codebook = bool(self.gui.exp_build_cb_var.get())
++        cfg.do_eval_codebook = bool(self.gui.exp_eval_cb_var.get())
++        cfg.do_wideband_ttd_vs_phase = bool(self.gui.exp_wideband_cb_var.get())
++        cfg.do_adv_maps = bool(self.gui.exp_adv_maps_cb_var.get())
++
++        # Shared array params from spherical and wideband panels (use spherical panel as base)
++        try:
++            cfg.layout = (self.gui.sc_layout_var.get() or "upa").lower()
++            cfg.num_x = int(self.gui.sc_numx_var.get())
++            cfg.num_y = int(self.gui.sc_numy_var.get())
++            cfg.dx_m = float(self.gui.sc_dx_var.get())
++            cfg.dy_m = float(self.gui.sc_dy_var.get())
++        except Exception:
++            pass
++
++        # Spherical Codebook params
++        try:
++            cfg.fc_hz = float(self.gui.sc_fc_var.get())
++            cfg.r_min = float(self.gui.sc_rmin_var.get())
++            cfg.r_max = float(self.gui.sc_rmax_var.get())
++            cfg.r_step = float(self.gui.sc_rstep_var.get())
++            cfg.theta_start = float(self.gui.sc_th_start_var.get())
++            cfg.theta_stop = float(self.gui.sc_th_stop_var.get())
++            cfg.theta_step = float(self.gui.sc_th_step_var.get())
++            cfg.phi_start = float(self.gui.sc_ph_start_var.get())
++            cfg.phi_stop = float(self.gui.sc_ph_stop_var.get())
++            cfg.phi_step = float(self.gui.sc_ph_step_var.get())
++            cfg.chunk = int(self.gui.sc_chunk_var.get())
++            out_path = self.gui.sc_out_path_var.get().strip()
++            cfg.out_codebook_path = out_path or None
++        except Exception:
++            pass
++
++        # Evaluate Codebook
++        try:
++            cfg.Q = int(self.gui.ev_Q_var.get())
++            cfg.x_min = float(self.gui.ev_xmin_var.get())
++            cfg.x_max = float(self.gui.ev_xmax_var.get())
++            cfg.y_min = float(self.gui.ev_ymin_var.get())
++            cfg.y_max = float(self.gui.ev_ymax_var.get())
++            cfg.z_min = float(self.gui.ev_zmin_var.get())
++            cfg.z_max = float(self.gui.ev_zmax_var.get())
++            cfg.compare_ff = bool(self.gui.ev_compare_ff_var.get())
++            in_path = self.gui.ev_in_path_var.get().strip()
++            cfg.in_codebook_path = in_path or None
++            cfg.save_eval_csv = bool(self.gui.ev_save_csv_var.get())
++            cfg.save_eval_png = bool(self.gui.ev_save_png_var.get())
++            cfg.save_eval_html = bool(self.gui.ev_save_html_var.get())
++        except Exception:
++            pass
++
++        # Advanced maps
++        try:
++            cfg.adv_map_type = self.gui.adv_map_type_var.get()
++            cfg.adv_fc_hz = float(self.gui.adv_fc_var.get())
++            cfg.adv_layout = (self.gui.adv_layout_var.get() or "upa").lower()
++            cfg.adv_num_x = int(self.gui.adv_numx_var.get())
++            cfg.adv_num_y = int(self.gui.adv_numy_var.get())
++            cfg.adv_dx_m = float(self.gui.adv_dx_var.get())
++            cfg.adv_dy_m = float(self.gui.adv_dy_var.get())
++            cfg.adv_r_fixed_m = float(self.gui.adv_rfixed_var.get())
++            cfg.adv_theta_start = float(self.gui.adv_th_start_var.get())
++            cfg.adv_theta_stop = float(self.gui.adv_th_stop_var.get())
++            cfg.adv_theta_step = float(self.gui.adv_th_step_var.get())
++            cfg.adv_phi_start = float(self.gui.adv_ph_start_var.get())
++            cfg.adv_phi_stop = float(self.gui.adv_ph_stop_var.get())
++            cfg.adv_phi_step = float(self.gui.adv_ph_step_var.get())
++            cfg.adv_r_min = float(self.gui.adv_rmin_var.get())
++            cfg.adv_r_max = float(self.gui.adv_rmax_var.get())
++            cfg.adv_r_step = float(self.gui.adv_rstep_var.get())
++            cfg.adv_theta_deg = float(self.gui.adv_theta_var.get())
++            cfg.adv_phi_deg = float(self.gui.adv_phi_var.get())
++            cfg.adv_weighting = self.gui.adv_weighting_var.get()
++            cfg.adv_compare_ff = bool(self.gui.adv_compare_ff_var.get())
++            cfg.adv_use_inmem_cb = bool(self.gui.adv_use_inmem_cb_var.get())
++            cb_path = self.gui.adv_cb_path_var.get().strip()
++            cfg.adv_cb_path = cb_path or None
++            cfg.adv_save_html = bool(self.gui.adv_save_html_var.get())
++            cfg.adv_save_csv = bool(self.gui.adv_save_csv_var.get())
++            cfg.adv_save_png = bool(self.gui.adv_save_png_var.get())
++            cfg.adv_chunk = int(self.gui.adv_chunk_var.get())
++        except Exception:
++            pass
++
++        # Wideband
++        try:
++            cfg.wb_fc_hz = float(self.gui.wb_fc_var.get())
++            cfg.wb_bw_hz = float(self.gui.wb_bw_var.get())
++            cfg.wb_n_sc = int(self.gui.wb_nsc_var.get())
++            cfg.focus_r = float(self.gui.wb_r_var.get())
++            cfg.focus_theta_deg = float(self.gui.wb_theta_var.get())
++            cfg.focus_phi_deg = float(self.gui.wb_phi_var.get())
++            cfg.save_wb_png = bool(self.gui.wb_save_png_var.get())
++            cfg.save_wb_json = bool(self.gui.wb_save_json_var.get())
++            cfg.save_wb_html = bool(self.gui.wb_save_html_var.get())
++        except Exception:
++            pass
++
++        # Callbacks
++        cfg.callbacks = {
++            "log": self.gui._append_log,
++            "status": self.gui._schedule_status,
++            "progress": self.gui._set_progress_fraction,
++            "plots_clear": self.gui._clear_plots,
++            "add_fig": self.gui._add_figure,
++            "set_summary": self.gui._set_summary_text,
++        }
++        cfg.cancel_flag = self.cancel_flag
++        return cfg
++
++    # Expose last codebook to evaluation step
++    def get_last_codebook(self) -> Optional[dict]:
++        return self._last_codebook_result
++
++    def set_last_codebook(self, res: dict | None) -> None:
++        self._last_codebook_result = res
++
++
++# ============= Experiment run functions =============
++def run_build_spherical_codebook(cfg: RunConfig) -> dict:
++    """
++    Build spherical codebook over (r,theta,phi) grid for the specified array and fc.
++    Returns a dict with keys: {'xyz_m','fc_hz','rtp_grid','codebook','attrs'}.
++    Write to HDF5 if an output path is provided.
++    Stream logs to Activity tab; push a small progress bar (% grid processed).
++    """
++    log = cfg.callbacks.get("log", lambda s: None)
++    status = cfg.callbacks.get("status", lambda s: None)
++    progress = cfg.callbacks.get("progress", lambda f=None: None)
++
++    # Validation
++    if cfg.fc_hz <= 0 or cfg.r_min <= 0 or cfg.r_step <= 0 or cfg.wb_n_sc < 0:
++        raise ValueError("Invalid numeric parameters (check fc, r_min, r_step)")
++    if cfg.num_x < 1 or cfg.num_y < 1 or cfg.dx_m <= 0 or cfg.dy_m <= 0:
++        raise ValueError("Invalid array parameters")
++
++    rng = np.random.default_rng(cfg.seed)
++    _ = rng  # reserved for future use
++
++    log("Preparing array and grid...\n")
++    xyz_m = make_array(cfg.layout, cfg.num_x, cfg.num_y, cfg.dx_m, cfg.dy_m)
++    r_vals = np.arange(cfg.r_min, cfg.r_max + 0.5 * cfg.r_step, cfg.r_step, dtype=np.float64)
++    th_vals = np.arange(cfg.theta_start, cfg.theta_stop + 0.5 * cfg.theta_step, cfg.theta_step, dtype=np.float64)
++    ph_vals = np.arange(cfg.phi_start, cfg.phi_stop + 0.5 * cfg.phi_step, cfg.phi_step, dtype=np.float64)
++    grid = np.array([(r, th, ph) for r in r_vals for th in th_vals for ph in ph_vals], dtype=np.float64)
++    N = grid.shape[0]
++    M = xyz_m.shape[0]
++    log(f"Grid points: {N} | Elements: {M}\n")
++
++    # Allocate codebook
++    codebook = np.zeros((N, M), dtype=np.complex128)
++    chunk = max(1, int(cfg.chunk))
++    status("Building spherical codebook...")
++    progress(0.0)
++    t0 = time.perf_counter()
++    for i0 in range(0, N, chunk):
++        if cfg.cancel_flag and cfg.cancel_flag.is_set():
++            log("Cancelled during codebook build.\n")
++            break
++        i1 = min(N, i0 + chunk)
++        for i in range(i0, i1):
++            r, th, ph = grid[i]
++            p = rtp_to_xyz(float(r), float(th), float(ph))
++            a = _spherical_steering_vector(xyz_m, p, cfg.fc_hz)
++            codebook[i, :] = a
++        progress(i1 / N)
++    dt = time.perf_counter() - t0
++    status(f"Codebook built in {dt:.2f}s")
++    progress(None)
++
++    attrs = {
++        "timestamp": datetime.utcnow().isoformat() + "Z",
++        "fc_hz": float(cfg.fc_hz),
++        "layout": cfg.layout,
++        "num_x": int(cfg.num_x),
++        "num_y": int(cfg.num_y),
++        "dx_m": float(cfg.dx_m),
++        "dy_m": float(cfg.dy_m),
++        "r_min": float(cfg.r_min),
++        "r_max": float(cfg.r_max),
++        "r_step": float(cfg.r_step),
++        "theta_start": float(cfg.theta_start),
++        "theta_stop": float(cfg.theta_stop),
++        "theta_step": float(cfg.theta_step),
++        "phi_start": float(cfg.phi_start),
++        "phi_stop": float(cfg.phi_stop),
++        "phi_step": float(cfg.phi_step),
++        "seed": int(cfg.seed) if cfg.seed is not None else None,
++    }
++    res = {
++        "xyz_m": xyz_m,
++        "fc_hz": float(cfg.fc_hz),
++        "rtp_grid": grid,
++        "codebook": codebook,
++        "attrs": attrs,
++    }
++
++    # Save if requested
++    if cfg.out_codebook_path:
++        if h5py is None:
++            log("h5py not available; skipping HDF5 save.\n")
++        else:
++            status("Writing HDF5...")
++            try:
++                with h5py.File(cfg.out_codebook_path, "w") as hf:
++                    hf.create_dataset("xyz_m", data=xyz_m)
++                    hf.create_dataset("fc_hz", data=np.array([cfg.fc_hz], dtype=np.float64))
++                    hf.create_dataset("rtp_grid", data=grid)
++                    hf.create_dataset("codebook", data=codebook)
++                    for k, v in attrs.items():
++                        if v is not None:
++                            hf.attrs[k] = v
++                log(f"Saved codebook to {cfg.out_codebook_path}\n")
++            except Exception as e:  # pragma: no cover - filesystem
++                log(f"HDF5 save error: {e}\n")
++    return res
++
++
++def run_eval_codebook_mismatch(cfg: RunConfig, codebook_res: Optional[dict] = None) -> dict:
++    """
++    Load or reuse an in-memory spherical codebook. Sample Q query points in the region,
++    compute (1) quantization loss vs ideal spherical focusing and
++    (2) optional far-field mismatch loss.
++    Plot two histograms to the Plots tab and a small text summary to the Summary tab.
++    Save CSV of per-point losses if toggled. Return summary stats dict.
++    """
++    log = cfg.callbacks.get("log", lambda s: None)
++    status = cfg.callbacks.get("status", lambda s: None)
++    add_fig = cfg.callbacks.get("add_fig", lambda f: None)
++    plots_clear = cfg.callbacks.get("plots_clear", lambda: None)
++    set_summary = cfg.callbacks.get("set_summary", lambda s: None)
++
++    rng = np.random.default_rng(cfg.seed)
++    # Load or reuse
++    if codebook_res is None and cfg.in_codebook_path:
++        if h5py is None:
++            raise RuntimeError("h5py not available to load codebook")
++        status("Loading codebook from HDF5...")
++        with h5py.File(cfg.in_codebook_path, "r") as hf:
++            xyz_m = hf["xyz_m"][...]
++            fc_hz = float(hf["fc_hz"][...][0]) if "fc_hz" in hf else float(hf.attrs.get("fc_hz", cfg.fc_hz))
++            rtp_grid = hf["rtp_grid"][...]
++            codebook = hf["codebook"][...]
++        codebook_res = {"xyz_m": xyz_m, "fc_hz": fc_hz, "rtp_grid": rtp_grid, "codebook": codebook, "attrs": {}}
++        log(f"Loaded codebook: {cfg.in_codebook_path}\n")
++    if codebook_res is None:
++        raise RuntimeError("No in-memory codebook and no HDF5 path provided.")
++
++    xyz_m = np.array(codebook_res["xyz_m"])  # (M,3)
++    fc_hz = float(codebook_res.get("fc_hz", cfg.fc_hz))
++    codebook = np.array(codebook_res["codebook"])  # (N,M)
++
++    # Sample Q query points
++    Q = int(max(1, cfg.Q))
++    xs = rng.uniform(cfg.x_min, cfg.x_max, size=Q)
++    ys = rng.uniform(cfg.y_min, cfg.y_max, size=Q)
++    zs = rng.uniform(cfg.z_min, cfg.z_max, size=Q)
++    P = np.stack([xs, ys, zs], axis=1)
++
++    # Evaluate losses
++    losses_q_db = np.zeros(Q, dtype=np.float64)
++    losses_ff_db = np.zeros(Q, dtype=np.float64) if cfg.compare_ff else None
++    log("Evaluating codebook mismatch...\n")
++    for i in range(Q):
++        if cfg.cancel_flag and cfg.cancel_flag.is_set():
++            log("Cancelled during evaluation.\n")
++            break
++        p = P[i]
++        a = _spherical_steering_vector(xyz_m, p, fc_hz)
++        # Best codebook match by inner product magnitude
++        sims = np.abs(codebook @ np.conjugate(a))  # (N,)
++        best = np.argmax(sims)
++        c = codebook[best]
++        Gq = _gain(c, a)
++        losses_q_db[i] = -10.0 * np.log10(max(Gq, 1e-12))
++        if cfg.compare_ff and losses_ff_db is not None:
++            # Direction from origin to p
++            r = float(np.linalg.norm(p))
++            if r <= 0:
++                losses_ff_db[i] = 0.0
++            else:
++                # derive angles
++                # phi = arcsin(z/r), theta = atan2(y,x)
++                phi_deg = math.degrees(math.asin(float(p[2] / r)))
++                theta_deg = math.degrees(math.atan2(float(p[1]), float(p[0])))
++                ff = _far_field_steering_vector(xyz_m, theta_deg, phi_deg, fc_hz)
++                Gff = _gain(ff, a)
++                losses_ff_db[i] = -10.0 * np.log10(max(Gff, 1e-12))
++
++    # Plot histograms
++    fig_mpl = None
++    try:
++        plots_clear()
++        fig_mpl = plot_histograms(losses_q_db, losses_ff_db)
++        add_fig(fig_mpl)
++    except Exception as e:
++        log(f"Plot error: {e}\n")
++
++    # Summary
++    def _stats(x: np.ndarray) -> dict:
++        return {
++            "mean": float(np.mean(x)),
++            "median": float(np.median(x)),
++            "std": float(np.std(x)),
++            "q95": float(np.quantile(x, 0.95)),
++        }
++
++    summary = {"quantization_loss_db": _stats(losses_q_db)}
++    if losses_ff_db is not None:
++        summary["farfield_loss_db"] = _stats(losses_ff_db)
++
++    # Text summary
++    lines = ["Codebook Evaluation Summary\n"]
++    q = summary["quantization_loss_db"]
++    lines.append(
++        f"- Quantization loss dB: mean={q['mean']:.2f}, median={q['median']:.2f}, std={q['std']:.2f}, 95th={q['q95']:.2f}"
++    )
++    if "farfield_loss_db" in summary:
++        ff = summary["farfield_loss_db"]
++        lines.append(
++            f"- Far-field mismatch dB: mean={ff['mean']:.2f}, median={ff['median']:.2f}, std={ff['std']:.2f}, 95th={ff['q95']:.2f}"
++        )
++    set_summary("\n".join(lines))
++
++    # Optional CSV/PNG save
++    if cfg.save_eval_csv:
++        try:
++            out_csv = os.path.join(os.getcwd(), f"codebook_eval_{int(time.time())}.csv")
++            with open(out_csv, "w", encoding="utf-8") as f:
++                if losses_ff_db is None:
++                    f.write("loss_quant_db\n")
++                    for v in losses_q_db:
++                        f.write(f"{float(v):.6f}\n")
++                else:
++                    f.write("loss_quant_db,loss_farfield_db\n")
++                    for v1, v2 in zip(losses_q_db, losses_ff_db):
++                        f.write(f"{float(v1):.6f},{float(v2):.6f}\n")
++            log(f"Saved CSV: {out_csv}\n")
++        except Exception as e:  # pragma: no cover - filesystem
++            log(f"CSV save error: {e}\n")
++    if cfg.save_eval_png and fig_mpl is not None:
++        try:
++            import matplotlib.pyplot as plt  # type: ignore
++            out_png = os.path.join(os.getcwd(), f"codebook_eval_{int(time.time())}.png")
++            fig_mpl.savefig(out_png, dpi=150, bbox_inches="tight")
++            log(f"Saved PNG: {out_png}\n")
++        except Exception as e:  # pragma: no cover - filesystem
++            log(f"PNG save error: {e}\n")
++
++    # Optional HTML (interactive) save via Plotly
++    if cfg.save_eval_html:
++        try:
++            import plotly.graph_objects as go  # type: ignore
++            import plotly.io as pio  # type: ignore
++            bins = 30
++            figly = go.Figure()
++            figly.add_trace(go.Histogram(x=losses_q_db, nbinsx=bins, name='Quantization loss', opacity=0.75))
++            if losses_ff_db is not None:
++                figly.add_trace(go.Histogram(x=losses_ff_db, nbinsx=bins, name='Far-field mismatch', opacity=0.75))
++            figly.update_layout(barmode='overlay', xaxis_title='Loss (dB)', yaxis_title='Count', legend_title_text='Series')
++            out_html = os.path.join(os.getcwd(), f"codebook_eval_{int(time.time())}.html")
++            pio.write_html(figly, file=out_html, include_plotlyjs='cdn', full_html=True, auto_open=False)
++            log(f"Saved interactive HTML: {out_html}\n")
++        except Exception as e:
++            log(f"HTML save error: {e}\n")
++
++    return summary
++
++
++def run_wideband_compare_ttd_vs_phase(cfg: RunConfig) -> dict:
++    """
++    Build wideband spherical steering across subcarriers (K = n_sc).
++    Design frequency-flat phase-shifter weights at fc and TTD delays per element.
++    Compute gain spectrum per subcarrier, gain flatness (dB), beam squint (deg),
++    and achievable rate. Plot gain-vs-frequency (TTD vs PS) and print summary.
++    Return dict with metrics and arrays for optional saving.
++    """
++    log = cfg.callbacks.get("log", lambda s: None)
++    status = cfg.callbacks.get("status", lambda s: None)
++    plots_clear = cfg.callbacks.get("plots_clear", lambda: None)
++    add_fig = cfg.callbacks.get("add_fig", lambda f: None)
++    set_summary = cfg.callbacks.get("set_summary", lambda s: None)
++
++    # Validation
++    if cfg.wb_fc_hz <= 0 or cfg.wb_bw_hz <= 0 or cfg.wb_n_sc < 4:
++        raise ValueError("Invalid wideband params (check fc, bw, n_sc>=4)")
++    if cfg.num_x < 1 or cfg.num_y < 1 or cfg.dx_m <= 0 or cfg.dy_m <= 0:
++        raise ValueError("Invalid array parameters")
++
++    xyz_m = make_array(cfg.layout, cfg.num_x, cfg.num_y, cfg.dx_m, cfg.dy_m)
++    p = rtp_to_xyz(cfg.focus_r, cfg.focus_theta_deg, cfg.focus_phi_deg)
++
++    # Frequencies
++    K = int(cfg.wb_n_sc)
++    f0 = float(cfg.wb_fc_hz)
++    bw = float(cfg.wb_bw_hz)
++    freqs = np.linspace(f0 - bw / 2.0, f0 + bw / 2.0, K)
++
++    # PS weights designed at fc
++    a0 = _spherical_steering_vector(xyz_m, p, f0)
++    w_ps = a0 / (np.linalg.norm(a0) + 1e-12)
++
++    # TTD weights: delays to align at point p
++    tau = np.linalg.norm(p[None, :] - xyz_m, axis=1) / SPEED_OF_LIGHT  # (M,)
++
++    gains_ps = np.zeros(K, dtype=np.float64)
++    gains_ttd = np.zeros(K, dtype=np.float64)
++    for k, fk in enumerate(freqs):
++        if cfg.cancel_flag and cfg.cancel_flag.is_set():
++            log("Cancelled during wideband comparison.\n")
++            break
++        a_k = _wideband_steering_vector(xyz_m, p, float(fk))
++        # PS fixed weights
++        gains_ps[k] = _gain(w_ps, a_k)
++        # TTD frequency-dependent weights
++        w_ttd = np.exp(-1j * 2.0 * math.pi * float(fk) * tau)
++        w_ttd = w_ttd / (np.linalg.norm(w_ttd) + 1e-12)
++        gains_ttd[k] = _gain(w_ttd, a_k)
++
++    # Convert to dB
++    g_ps_db = 10.0 * np.log10(np.maximum(gains_ps, 1e-12))
++    g_ttd_db = 10.0 * np.log10(np.maximum(gains_ttd, 1e-12))
++    flat_ps = float(np.max(g_ps_db) - np.min(g_ps_db))
++    flat_ttd = float(np.max(g_ttd_db) - np.min(g_ttd_db))
++
++    # Beam squint estimation along azimuth slice at fixed elevation (phi=focus_phi)
++    def _estimate_squint(weights: np.ndarray, phi_deg: float) -> float:
++        thetas = np.linspace(cfg.focus_theta_deg - 60.0, cfg.focus_theta_deg + 60.0, 121)
++        # Peak theta at center frequency
++        best0 = 0.0
++        best_t0 = thetas[0]
++        ff0 = [_far_field_steering_vector(xyz_m, float(t), float(phi_deg), f0) for t in thetas]
++        for t, a_ff in zip(thetas, ff0):
++            val = _gain(weights, a_ff)
++            if val > best0:
++                best0 = val
++                best_t0 = float(t)
++        # Now measure at band edges
++        edges = [freqs[0], freqs[-1]]
++        t_edges = []
++        for fk in edges:
++            best = 0.0
++            best_t = thetas[0]
++            ffk = [_far_field_steering_vector(xyz_m, float(t), float(phi_deg), float(fk)) for t in thetas]
++            for t, a_ff in zip(thetas, ffk):
++                val = _gain(weights, a_ff)
++                if val > best:
++                    best = val
++                    best_t = float(t)
++            t_edges.append(best_t)
++        # Average absolute drift relative to center
++        return float(np.mean(np.abs(np.array(t_edges) - best_t0)))
++
++    squint_ps = _estimate_squint(w_ps, cfg.focus_phi_deg)
++    # For TTD, evaluate at center frequency weights across edges (expect near zero)
++    w_ttd_center = np.exp(-1j * 2.0 * math.pi * f0 * tau)
++    w_ttd_center = w_ttd_center / (np.linalg.norm(w_ttd_center) + 1e-12)
++    squint_ttd = _estimate_squint(w_ttd_center, cfg.focus_phi_deg)
++
++    # Plot spectrum
++    fig_mpl = None
++    try:
++        plots_clear()
++        fig_mpl = plot_gain_spectrum(freqs, g_ps_db, g_ttd_db)
++        add_fig(fig_mpl)
++    except Exception as e:
++        log(f"Plot error: {e}\n")
++
++    # Achievable rate (normalized SNR=1)
++    rate_ps = float(np.mean(np.log2(1.0 + gains_ps)))
++    rate_ttd = float(np.mean(np.log2(1.0 + gains_ttd)))
++
++    summary_lines = [
++        "Wideband Comparison Summary\n",
++        f"- flatness_PS_dB: {flat_ps:.2f}",
++        f"- flatness_TTD_dB: {flat_ttd:.2f}",
++        f"- squint_PS_deg: {squint_ps:.2f}",
++        f"- squint_TTD_deg: {squint_ttd:.2f}",
++        f"- rate_PS: {rate_ps:.3f}",
++        f"- rate_TTD: {rate_ttd:.3f}",
++    ]
++    set_summary("\n".join(summary_lines))
++
++    res = {
++        "freqs_hz": freqs,
++        "gain_ps_db": g_ps_db,
++        "gain_ttd_db": g_ttd_db,
++        "flatness_ps_db": flat_ps,
++        "flatness_ttd_db": flat_ttd,
++        "squint_ps_deg": squint_ps,
++        "squint_ttd_deg": squint_ttd,
++        "rate_ps": rate_ps,
++        "rate_ttd": rate_ttd,
++    }
++
++    # Optional saves
++    try:
++        if cfg.save_wb_png and fig_mpl is not None:
++            out_png = os.path.join(os.getcwd(), f"wideband_ttd_vs_ps_{int(time.time())}.png")
++            fig_mpl.savefig(out_png, dpi=150, bbox_inches="tight")
++            log(f"Saved PNG: {out_png}\n")
++        if cfg.save_wb_json:
++            out_json = os.path.join(os.getcwd(), f"wideband_ttd_vs_ps_{int(time.time())}.json")
++            with open(out_json, "w", encoding="utf-8") as f:
++                json.dump({k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in res.items()}, f, indent=2)
++            log(f"Saved JSON: {out_json}\n")
++        if cfg.save_wb_html:
++            try:
++                import plotly.graph_objects as go  # type: ignore
++                import plotly.io as pio  # type: ignore
++                figly = go.Figure()
++                figly.add_trace(go.Scatter(x=freqs/1e9, y=g_ps_db, mode='lines', name='PS'))
++                figly.add_trace(go.Scatter(x=freqs/1e9, y=g_ttd_db, mode='lines', name='TTD'))
++                figly.update_layout(xaxis_title='Frequency (GHz)', yaxis_title='Gain (dB)', legend_title_text='Series')
++                out_html = os.path.join(os.getcwd(), f"wideband_ttd_vs_ps_{int(time.time())}.html")
++                pio.write_html(figly, file=out_html, include_plotlyjs='cdn', full_html=True, auto_open=False)
++                log(f"Saved interactive HTML: {out_html}\n")
++            except Exception as e:
++                log(f"HTML save error: {e}\n")
++    except Exception as e:  # pragma: no cover - filesystem
++        log(f"Save error: {e}\n")
++
++    return res
++
++
++def run_advanced_aag_amg(cfg: RunConfig, codebook_res: Optional[dict]) -> dict:
++    """Compute AAG/AMAG maps and export interactive Plotly visuals.
++
++    Returns summary dict with stats and file paths.
++    """
++    log = cfg.callbacks.get("log", lambda s: None)
++    status = cfg.callbacks.get("status", lambda s: None)
++    set_summary = cfg.callbacks.get("set_summary", lambda s: None)
++    progress = cfg.callbacks.get("progress", lambda f=None: None)
++
++    if make_theta_phi_grid is None or per_point_gains is None:
++        raise RuntimeError("nearfield modules not available for advanced maps")
++
++    # Build array and validate
++    if cfg.adv_fc_hz <= 0 or cfg.adv_dx_m <= 0 or cfg.adv_dy_m <= 0 or cfg.adv_num_x < 1 or cfg.adv_num_y < 1:
++        raise ValueError("Invalid array or carrier parameters for advanced maps")
++    xyz = make_array(cfg.adv_layout, cfg.adv_num_x, cfg.adv_num_y, cfg.adv_dx_m, cfg.adv_dy_m)
++
++    files: list[str] = []
++    rng = np.random.default_rng(cfg.seed)
++    _ = rng
++
++    def _save_fig(fig, stem: str) -> None:
++        try:
++            ts = int(time.time())
++            if cfg.adv_save_html and pio is not None:
++                out_html = os.path.join(os.getcwd(), f"{stem}_{ts}.html")
++                pio.write_html(fig, file=out_html, include_plotlyjs='cdn', full_html=True, auto_open=False)
++                files.append(out_html)
++                log(f"Saved HTML: {out_html}\n")
++            if cfg.adv_save_png and pio is not None:
++                try:
++                    out_png = os.path.join(os.getcwd(), f"{stem}_{ts}.png")
++                    pio.write_image(fig, out_png, scale=2)
++                    files.append(out_png)
++                    log(f"Saved PNG: {out_png}\n")
++                except Exception as e:
++                    log(f"PNG export skipped (install kaleido): {e}\n")
++        except Exception as e:
++            log(f"Figure save error: {e}\n")
++
++    # Angular 2D map
++    if cfg.adv_map_type.startswith("Angular 2D"):
++        status("Computing angular 2D map...")
++        th = np.arange(cfg.adv_theta_start, cfg.adv_theta_stop + 0.5 * cfg.adv_theta_step, cfg.adv_theta_step, dtype=np.float64)
++        ph = np.arange(cfg.adv_phi_start, cfg.adv_phi_stop + 0.5 * cfg.adv_phi_step, cfg.adv_phi_step, dtype=np.float64)
++        if th.size == 0 or ph.size == 0:
++            raise ValueError("Empty theta/phi range")
++        grid = make_theta_phi_grid(th, ph)
++        P = grid.shape[0]
++        chunk = max(1, int(cfg.adv_chunk))
++        progress(0.0)
++        values_db = np.zeros(P, dtype=np.float64)
++        baseline_db = np.zeros(P, dtype=np.float64) if cfg.adv_compare_ff else None
++
++        # Prepare codebook if needed
++        C = None
++        if cfg.adv_weighting.startswith("Codebook"):
++            if cfg.adv_use_inmem_cb and codebook_res is not None:
++                C = np.array(codebook_res.get("codebook"))
++            elif cfg.adv_cb_path:
++                if h5py is None:
++                    raise RuntimeError("h5py not available to load codebook")
++                with h5py.File(cfg.adv_cb_path, "r") as hf:
++                    C = hf["codebook"][...]
++            else:
++                messagebox.showerror("Codebook required", "Select 'Use in-memory codebook' or choose a codebook HDF5 file.")
++                return {}
++            if C is None:
++                messagebox.showerror("Codebook required", "Codebook not found or failed to load.")
++                return {}
++
++        # Compute in chunks for responsiveness
++        for i0 in range(0, P, chunk):
++            if cfg.cancel_flag and cfg.cancel_flag.is_set():
++                log("Cancelled advanced maps computation.\n")
++                break
++            i1 = min(P, i0 + chunk)
++            sub = grid[i0:i1]
++            A = build_steering_on_angular_slice(xyz, cfg.adv_fc_hz, cfg.adv_r_fixed_m, sub)
++            if cfg.adv_weighting.startswith("Ideal"):
++                vals = np.sum(np.abs(A) ** 2, axis=1)
++                values_db[i0:i1] = 10.0 * np.log10(np.maximum(vals, 1e-12))
++            else:
++                # Codebook-selected per point
++                sims = A @ np.conjugate(C.T)  # (p,Nc)
++                idx = np.argmax(np.abs(sims), axis=1)
++                W = C[idx]
++                values_db[i0:i1] = per_point_gains(W, A, mode="db")
++            if cfg.adv_compare_ff:
++                # Far-field weights for same (theta,phi)
++                Wff = np.stack([
++                    _far_field_steering_vector(xyz, float(t), float(p), cfg.adv_fc_hz) for t, p in sub
++                ], axis=0)
++                baseline_db[i0:i1] = per_point_gains(Wff, A, mode="db")
++            progress(i1 / P)
++        progress(None)
++
++        # Optional loss vs ideal when codebook used
++        loss_db = None
++        if cfg.adv_weighting.startswith("Codebook"):
++            amag_db = np.zeros_like(values_db)
++            # For normalized steering rows, AMAG is 0 dB
++            # But compute explicitly for robustness
++            grid_full = build_steering_on_angular_slice(xyz, cfg.adv_fc_hz, cfg.adv_r_fixed_m, grid)
++            amag_vals = np.sum(np.abs(grid_full) ** 2, axis=1)
++            amag_db = 10.0 * np.log10(np.maximum(amag_vals, 1e-12))
++            loss_db = amag_db - values_db
++
++        # Plotly figures and save
++        if plotly_heatmap_theta_phi is not None:
++            title = "Gain map (dB): " + ("AMAG" if cfg.adv_weighting.startswith("Ideal") else "AAG (codebook)")
++            Z = values_db.reshape(ph.size, th.size)
++            fig = plotly_heatmap_theta_phi(th, ph, Z, title)
++            _save_fig(fig, "adv_map")
++            if loss_db is not None:
++                fig_loss = plotly_heatmap_theta_phi(th, ph, loss_db.reshape(ph.size, th.size), "Loss (AMAG - AAG) dB")
++                _save_fig(fig_loss, "adv_map_loss")
++            if baseline_db is not None:
++                fig_ff = plotly_heatmap_theta_phi(th, ph, baseline_db.reshape(ph.size, th.size), "Far-field baseline (dB)")
++                _save_fig(fig_ff, "adv_map_farfield")
++        else:
++            log("Plotly not available; skipping interactive heatmap.\n")
++
++        # Summary stats
++        def stats(x: np.ndarray) -> dict:
++            return {
++                "mean": float(np.mean(x)),
++                "median": float(np.median(x)),
++                "std": float(np.std(x)),
++                "p50": float(np.percentile(x, 50)),
++                "p90": float(np.percentile(x, 90)),
++                "p95": float(np.percentile(x, 95)),
++            }
++
++        summary = {"values_db": stats(values_db)}
++        if loss_db is not None:
++            summary["loss_db"] = stats(loss_db)
++        if baseline_db is not None:
++            summary["farfield_db"] = stats(baseline_db)
++
++        # CSV write
++        if cfg.adv_save_csv:
++            try:
++                out_csv = os.path.join(os.getcwd(), f"adv_map_{int(time.time())}.csv")
++                with open(out_csv, "w", encoding="utf-8") as f:
++                    header = "theta_deg,phi_deg,value_db"
++                    if baseline_db is not None:
++                        header += ",baseline_db"
++                    if loss_db is not None:
++                        header += ",loss_db"
++                    f.write(header + "\n")
++                    for (t, p), v, i in zip(grid, values_db, range(P)):
++                        row = f"{float(t):.6f},{float(p):.6f},{float(v):.6f}"
++                        if baseline_db is not None:
++                            row += f",{float(baseline_db[i]):.6f}"
++                        if loss_db is not None:
++                            row += f",{float(loss_db[i]):.6f}"
++                        f.write(row + "\n")
++                files.append(out_csv)
++                log(f"Saved CSV: {out_csv}\n")
++            except Exception as e:
++                log(f"CSV save error: {e}\n")
++
++        set_summary("Advanced AAG/AMAG map complete. See exported HTML/CSV for interactive view.")
++
++        return {"files": files, "theta": th, "phi": ph, "values_db": values_db}
++
++    # Radial slice
++    elif cfg.adv_map_type.startswith("Radial Slice"):
++        status("Computing radial slice map...")
++        r = np.arange(cfg.adv_r_min, cfg.adv_r_max + 0.5 * cfg.adv_r_step, cfg.adv_r_step, dtype=np.float64)
++        if r.size == 0:
++            raise ValueError("Empty r range")
++        A = build_steering_on_radial_slice(xyz, cfg.adv_fc_hz, r, cfg.adv_theta_deg, cfg.adv_phi_deg)
++        if cfg.adv_weighting.startswith("Ideal"):
++            vals = np.sum(np.abs(A) ** 2, axis=1)
++            values_db = 10.0 * np.log10(np.maximum(vals, 1e-12))
++        else:
++            C = None
++            if cfg.adv_use_inmem_cb and codebook_res is not None:
++                C = np.array(codebook_res.get("codebook"))
++            elif cfg.adv_cb_path:
++                if h5py is None:
++                    raise RuntimeError("h5py not available to load codebook")
++                with h5py.File(cfg.adv_cb_path, "r") as hf:
++                    C = hf["codebook"][...]
++            else:
++                messagebox.showerror("Codebook required", "Select 'Use in-memory codebook' or choose a codebook HDF5 file.")
++                return {}
++            sims = A @ np.conjugate(C.T)
++            idx = np.argmax(np.abs(sims), axis=1)
++            W = C[idx]
++            values_db = per_point_gains(W, A, mode="db")
++
++        baseline_db = None
++        if cfg.adv_compare_ff:
++            Wff = np.stack([
++                _far_field_steering_vector(xyz, float(cfg.adv_theta_deg), float(cfg.adv_phi_deg), cfg.adv_fc_hz)
++                for _ in range(r.size)
++            ], axis=0)
++            baseline_db = per_point_gains(Wff, A, mode="db")
++
++        if plotly_line_radial_slice is not None:
++            fig = plotly_line_radial_slice(r, values_db, "Radial slice gain (dB)")
++            _save_fig(fig, "adv_radial")
++            if baseline_db is not None:
++                if go is not None:
++                    fig2 = go.Figure(fig)
++                    fig2.add_scatter(x=r, y=baseline_db, mode='lines+markers', name='Far-field')
++                    _save_fig(fig2, "adv_radial_baseline")
++        else:
++            log("Plotly not available; skipping interactive line plot.\n")
++
++        if cfg.adv_save_csv:
++            try:
++                out_csv = os.path.join(os.getcwd(), f"adv_radial_{int(time.time())}.csv")
++                with open(out_csv, "w", encoding="utf-8") as f:
++                    header = "r_m,value_db"
++                    if baseline_db is not None:
++                        header += ",baseline_db"
++                    f.write(header + "\n")
++                    for i, rv in enumerate(r):
++                        row = f"{float(rv):.6f},{float(values_db[i]):.6f}"
++                        if baseline_db is not None:
++                            row += f",{float(baseline_db[i]):.6f}"
++                        f.write(row + "\n")
++                files.append(out_csv)
++                log(f"Saved CSV: {out_csv}\n")
++            except Exception as e:
++                log(f"CSV save error: {e}\n")
++
++        set_summary("Advanced AAG/AMAG radial slice complete. See exported HTML/CSV for interactive view.")
++        return {"files": files, "r": r, "values_db": values_db}
++
++    else:
++        raise ValueError("Unknown advanced map type")
++
++
++# ============= Plot helpers =============
++def plot_histograms(loss_q_db: np.ndarray, loss_ff_db_or_none: Optional[np.ndarray]) -> Any:
++    import matplotlib.pyplot as plt  # type: ignore
++    # Build consistent bins across both arrays
++    bins = 30
++    data = loss_q_db if loss_ff_db_or_none is None else np.concatenate([loss_q_db, loss_ff_db_or_none])
++    lo, hi = float(np.min(data)), float(np.max(data))
++    if hi <= lo:
++        hi = lo + 1.0
++    bins_edges = np.linspace(lo, hi, bins + 1)
++    centers = 0.5 * (bins_edges[:-1] + bins_edges[1:])
++    h1, _ = np.histogram(loss_q_db, bins=bins_edges)
++    fig, ax = plt.subplots(1, 1, figsize=(6, 4), dpi=120)
++    l1, = ax.plot(centers, h1, drawstyle='steps-mid', label="Quantization loss")
++    l2 = None
++    if loss_ff_db_or_none is not None:
++        h2, _ = np.histogram(loss_ff_db_or_none, bins=bins_edges)
++        l2, = ax.plot(centers, h2, drawstyle='steps-mid', label="Far-field mismatch")
++    ax.set_xlabel("Loss (dB)")
++    ax.set_ylabel("Count")
++    ax.grid(True, alpha=0.3)
++    leg = ax.legend(loc='best', fancybox=True, shadow=True)
++    # Enable toggling series by clicking legend
++    lines = [l for l in [l1, l2] if l is not None]
++    leg_lines = leg.get_lines()
++    # Some backends return more legend lines than plotted; slice
++    leg_pickables = leg_lines[: len(lines)]
++    for ll in leg_pickables:
++        ll.set_picker(True)
++        ll.set_pickradius(5)
++
++    def on_pick(event):
++        if event.artist in leg_pickables:
++            idx = leg_pickables.index(event.artist)
++            line = lines[idx]
++            vis = not line.get_visible()
++            line.set_visible(vis)
++            event.artist.set_alpha(1.0 if vis else 0.2)
++            fig.canvas.draw_idle()
++
++    fig.canvas.mpl_connect('pick_event', on_pick)
++    fig.tight_layout()
++    return fig
++
++
++def plot_gain_spectrum(freqs_hz: np.ndarray, gain_ps_db: np.ndarray, gain_ttd_db: np.ndarray) -> Any:
++    import matplotlib.pyplot as plt  # type: ignore
++    fig, ax = plt.subplots(1, 1, figsize=(7, 4), dpi=120)
++    f_ghz = freqs_hz / 1e9
++    l1, = ax.plot(f_ghz, gain_ps_db, label="Phase Shifter (PS)")
++    l2, = ax.plot(f_ghz, gain_ttd_db, label="True-Time-Delay (TTD)")
++    ax.set_xlabel("Frequency (GHz)")
++    ax.set_ylabel("Gain (dB)")
++    ax.grid(True, alpha=0.3)
++    leg = ax.legend(loc='best', fancybox=True, shadow=True)
++    # Toggle by clicking legend entries
++    lines = [l1, l2]
++    leg_lines = leg.get_lines()[:2]
++    for ll in leg_lines:
++        ll.set_picker(True)
++        ll.set_pickradius(5)
++
++    def on_pick(event):
++        if event.artist in leg_lines:
++            idx = leg_lines.index(event.artist)
++            line = lines[idx]
++            vis = not line.get_visible()
++            line.set_visible(vis)
++            event.artist.set_alpha(1.0 if vis else 0.2)
++            fig.canvas.draw_idle()
++
++    fig.canvas.mpl_connect('pick_event', on_pick)
++    fig.tight_layout()
++    return fig
++
+ 
+ class _ToolTip:
+     def __init__(self, widget, text: str):
+@@ -56,12 +1139,16 @@ class _ToolTip:
+ class MainSimulationGUI:
+     def __init__(self, root: tk.Tk) -> None:
+         self.root = root
+-        root.title("Near-Field Simulator ΓÇô Main Console")
++        root.title("Near-Field Simulator - Main Console")
+         root.geometry("1280x820")
+         root.minsize(1024, 640)
+ 
+         self.running = False
+         self._setup_styles()
++        # Experiments controller
++        self.exp_ctrl = ExperimentController(self)
++        # A small flag to track if progress bar is in determinate mode
++        self._progress_determinate = False
+ 
+         outer = ttk.Frame(root, padding=10)
+         outer.pack(fill=tk.BOTH, expand=True)
+@@ -112,7 +1199,7 @@ class MainSimulationGUI:
+         self.json_cb.grid(row=5, column=1, sticky="ew", pady=(0, 4))
+         ttk.Checkbutton(controls, text="Use JSON profile", variable=self.use_json_var).grid(row=6, column=0, columnspan=2, sticky=tk.W)
+ 
+-        # Advanced overrides
++        # Advanced overrides (legacy complete simulation)
+         ttk.Separator(controls).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 6))
+         self.adv_var = tk.BooleanVar(value=False)
+         adv = ttk.Labelframe(controls, text="Advanced Overrides", padding=(8, 6))
+@@ -148,9 +1235,13 @@ class MainSimulationGUI:
+         self.njobs_var = tk.IntVar(value=-1)
+         ttk.Entry(adv, textvariable=self.njobs_var, width=8).grid(row=5, column=1, sticky=tk.W)
+ 
++        # Experiments (advanced)
++        ttk.Separator(controls).grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 6))
++        self._build_experiments_section(controls, row=10)
++
+         # Tests selection
+         tests_frame = ttk.Labelframe(controls, text="Select Tests", padding=(10, 8))
+-        tests_frame.grid(row=9, column=0, columnspan=2, sticky="nsew")
++        tests_frame.grid(row=11, column=0, columnspan=2, sticky="nsew")
+         tests_frame.grid_columnconfigure(0, weight=1)
+         self.test_vars = {
+             "Basic Functionality": tk.BooleanVar(value=False),
+@@ -171,211 +1262,6 @@ class MainSimulationGUI:
+         ttk.Button(btn_row, text="Select All", command=self._select_all).pack(side=tk.LEFT)
+         ttk.Button(btn_row, text="Clear", command=self._clear_all).pack(side=tk.LEFT, padx=(6, 0))
+ 
+-        # ========== Experiments (advanced) ==========
+-        exp_frame = ttk.Labelframe(controls, text="Experiments (advanced)", padding=(10, 8))
+-        exp_frame.grid(row=10, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+-        exp_frame.grid_columnconfigure(0, weight=1)
+-
+-        self.exp_build_cb_var = tk.BooleanVar(value=False)
+-        self.exp_eval_cb_var = tk.BooleanVar(value=False)
+-        self.exp_wb_var = tk.BooleanVar(value=False)
+-        ttk.Checkbutton(exp_frame, text="Build Spherical Codebook", variable=self.exp_build_cb_var).grid(row=0, column=0, sticky=tk.W)
+-        ttk.Checkbutton(exp_frame, text="Evaluate Codebook Mismatch", variable=self.exp_eval_cb_var).grid(row=1, column=0, sticky=tk.W)
+-        ttk.Checkbutton(exp_frame, text="Wideband: TTD vs Phase", variable=self.exp_wb_var).grid(row=2, column=0, sticky=tk.W)
+-
+-        # Collapsible panels helpers
+-        def _make_toggle_row(parent, text, row):
+-            frm = ttk.Frame(parent)
+-            frm.grid(row=row, column=0, sticky="ew", pady=(6, 2))
+-            btn = ttk.Button(frm, text="-", width=2)
+-            lbl = ttk.Label(frm, text=text, font=("Segoe UI", 10, "bold"))
+-            btn.pack(side=tk.LEFT)
+-            lbl.pack(side=tk.LEFT, padx=(6, 0))
+-            return btn
+-
+-        # (3.1) Spherical Codebook panel
+-        toggle_build = _make_toggle_row(exp_frame, "Spherical Codebook", 3)
+-        build_panel = ttk.Frame(exp_frame)
+-        build_panel.grid(row=4, column=0, sticky="ew")
+-        for c in range(6):
+-            build_panel.grid_columnconfigure(c, weight=1)
+-
+-        ttk.Label(build_panel, text="Array layout").grid(row=0, column=0, sticky=tk.W)
+-        self.sc_layout_var = tk.StringVar(value="upa")
+-        ttk.Combobox(build_panel, textvariable=self.sc_layout_var, values=["upa", "ula"], state="readonly", width=6).grid(row=0, column=1, sticky="w")
+-        ttk.Label(build_panel, text="num_x").grid(row=0, column=2, sticky=tk.W)
+-        self.sc_numx_var = tk.IntVar(value=32)
+-        ttk.Entry(build_panel, textvariable=self.sc_numx_var, width=8).grid(row=0, column=3, sticky="w")
+-        ttk.Label(build_panel, text="num_y").grid(row=0, column=4, sticky=tk.W)
+-        self.sc_numy_var = tk.IntVar(value=32)
+-        ttk.Entry(build_panel, textvariable=self.sc_numy_var, width=8).grid(row=0, column=5, sticky="w")
+-
+-        ttk.Label(build_panel, text="dx (m)").grid(row=1, column=0, sticky=tk.W)
+-        self.sc_dx_var = tk.DoubleVar(value=0.5e-3)
+-        ttk.Entry(build_panel, textvariable=self.sc_dx_var, width=10).grid(row=1, column=1, sticky="w")
+-        ttk.Label(build_panel, text="dy (m)").grid(row=1, column=2, sticky=tk.W)
+-        self.sc_dy_var = tk.DoubleVar(value=0.5e-3)
+-        ttk.Entry(build_panel, textvariable=self.sc_dy_var, width=10).grid(row=1, column=3, sticky="w")
+-
+-        ttk.Label(build_panel, text="fc_hz").grid(row=2, column=0, sticky=tk.W)
+-        self.sc_fc_var = tk.DoubleVar(value=28e9)
+-        ttk.Entry(build_panel, textvariable=self.sc_fc_var, width=12).grid(row=2, column=1, sticky="w")
+-
+-        ttk.Label(build_panel, text="r_min").grid(row=3, column=0, sticky=tk.W)
+-        ttk.Label(build_panel, text="r_max").grid(row=3, column=2, sticky=tk.W)
+-        ttk.Label(build_panel, text="r_step").grid(row=3, column=4, sticky=tk.W)
+-        self.sc_rmin_var = tk.DoubleVar(value=3.0)
+-        self.sc_rmax_var = tk.DoubleVar(value=20.0)
+-        self.sc_rstep_var = tk.DoubleVar(value=0.5)
+-        ttk.Entry(build_panel, textvariable=self.sc_rmin_var, width=8).grid(row=3, column=1, sticky="w")
+-        ttk.Entry(build_panel, textvariable=self.sc_rmax_var, width=8).grid(row=3, column=3, sticky="w")
+-        ttk.Entry(build_panel, textvariable=self.sc_rstep_var, width=8).grid(row=3, column=5, sticky="w")
+-
+-        ttk.Label(build_panel, text="theta start/stop/step").grid(row=4, column=0, sticky=tk.W)
+-        self.sc_tstart_var = tk.DoubleVar(value=-60.0)
+-        self.sc_tstop_var = tk.DoubleVar(value=60.0)
+-        self.sc_tstep_var = tk.DoubleVar(value=5.0)
+-        ttk.Entry(build_panel, textvariable=self.sc_tstart_var, width=8).grid(row=4, column=1, sticky="w")
+-        ttk.Entry(build_panel, textvariable=self.sc_tstop_var, width=8).grid(row=4, column=3, sticky="w")
+-        ttk.Entry(build_panel, textvariable=self.sc_tstep_var, width=8).grid(row=4, column=5, sticky="w")
+-
+-        ttk.Label(build_panel, text="phi start/stop/step").grid(row=5, column=0, sticky=tk.W)
+-        self.sc_pstart_var = tk.DoubleVar(value=-30.0)
+-        self.sc_pstop_var = tk.DoubleVar(value=30.0)
+-        self.sc_pstep_var = tk.DoubleVar(value=5.0)
+-        ttk.Entry(build_panel, textvariable=self.sc_pstart_var, width=8).grid(row=5, column=1, sticky="w")
+-        ttk.Entry(build_panel, textvariable=self.sc_pstop_var, width=8).grid(row=5, column=3, sticky="w")
+-        ttk.Entry(build_panel, textvariable=self.sc_pstep_var, width=8).grid(row=5, column=5, sticky="w")
+-
+-        ttk.Label(build_panel, text="chunk").grid(row=6, column=0, sticky=tk.W)
+-        self.sc_chunk_var = tk.IntVar(value=2048)
+-        ttk.Entry(build_panel, textvariable=self.sc_chunk_var, width=8).grid(row=6, column=1, sticky="w")
+-
+-        ttk.Label(build_panel, text="Output HDF5").grid(row=7, column=0, sticky=tk.W)
+-        self.sc_out_path_var = tk.StringVar(value=os.path.abspath("codebook.h5"))
+-        ttk.Entry(build_panel, textvariable=self.sc_out_path_var, width=32).grid(row=7, column=1, columnspan=3, sticky="ew")
+-        ttk.Button(build_panel, text="Browse...", command=lambda: self._choose_file(self.sc_out_path_var, save=True, defaultextension=".h5", filetypes=[("HDF5","*.h5")])).grid(row=7, column=4, columnspan=2, sticky="w")
+-
+-        # (3.2) Evaluate Codebook Mismatch
+-        toggle_eval = _make_toggle_row(exp_frame, "Evaluate Codebook Mismatch", 5)
+-        eval_panel = ttk.Frame(exp_frame)
+-        eval_panel.grid(row=6, column=0, sticky="ew")
+-        for c in range(6):
+-            eval_panel.grid_columnconfigure(c, weight=1)
+-
+-        ttk.Label(eval_panel, text="Q (queries)").grid(row=0, column=0, sticky=tk.W)
+-        self.ev_q_var = tk.IntVar(value=200)
+-        ttk.Entry(eval_panel, textvariable=self.ev_q_var, width=8).grid(row=0, column=1, sticky="w")
+-
+-        # region: x/y/z min/max
+-        ttk.Label(eval_panel, text="x_min/x_max").grid(row=1, column=0, sticky=tk.W)
+-        ttk.Label(eval_panel, text="y_min/y_max").grid(row=2, column=0, sticky=tk.W)
+-        ttk.Label(eval_panel, text="z_min/z_max").grid(row=3, column=0, sticky=tk.W)
+-        self.ev_xmin = tk.DoubleVar(value=-5.0)
+-        self.ev_xmax = tk.DoubleVar(value=5.0)
+-        self.ev_ymin = tk.DoubleVar(value=-5.0)
+-        self.ev_ymax = tk.DoubleVar(value=5.0)
+-        self.ev_zmin = tk.DoubleVar(value=2.0)
+-        self.ev_zmax = tk.DoubleVar(value=10.0)
+-        ttk.Entry(eval_panel, textvariable=self.ev_xmin, width=8).grid(row=1, column=1, sticky="w")
+-        ttk.Entry(eval_panel, textvariable=self.ev_xmax, width=8).grid(row=1, column=2, sticky="w")
+-        ttk.Entry(eval_panel, textvariable=self.ev_ymin, width=8).grid(row=2, column=1, sticky="w")
+-        ttk.Entry(eval_panel, textvariable=self.ev_ymax, width=8).grid(row=2, column=2, sticky="w")
+-        ttk.Entry(eval_panel, textvariable=self.ev_zmin, width=8).grid(row=3, column=1, sticky="w")
+-        ttk.Entry(eval_panel, textvariable=self.ev_zmax, width=8).grid(row=3, column=2, sticky="w")
+-
+-        self.ev_compare_ff_var = tk.BooleanVar(value=False)
+-        ttk.Checkbutton(eval_panel, text="Compare with plane-wave baseline", variable=self.ev_compare_ff_var).grid(row=4, column=0, columnspan=3, sticky=tk.W)
+-
+-        ttk.Label(eval_panel, text="Input HDF5 (optional)").grid(row=5, column=0, sticky=tk.W)
+-        self.ev_in_path_var = tk.StringVar(value="")
+-        ttk.Entry(eval_panel, textvariable=self.ev_in_path_var, width=32).grid(row=5, column=1, columnspan=3, sticky="ew")
+-        ttk.Button(eval_panel, text="Browse...", command=lambda: self._choose_file(self.ev_in_path_var, save=False, defaultextension=".h5", filetypes=[("HDF5","*.h5")])).grid(row=5, column=4, columnspan=2, sticky="w")
+-
+-        self.ev_save_csv_var = tk.BooleanVar(value=False)
+-        self.ev_save_png_var = tk.BooleanVar(value=False)
+-        ttk.Checkbutton(eval_panel, text="Save CSV", variable=self.ev_save_csv_var).grid(row=6, column=0, sticky=tk.W)
+-        ttk.Checkbutton(eval_panel, text="Save PNG", variable=self.ev_save_png_var).grid(row=6, column=1, sticky=tk.W)
+-
+-        # (3.3) Wideband: TTD vs Phase
+-        toggle_wb = _make_toggle_row(exp_frame, "Wideband: TTD vs Phase", 7)
+-        wb_panel = ttk.Frame(exp_frame)
+-        wb_panel.grid(row=8, column=0, sticky="ew")
+-        for c in range(8):
+-            wb_panel.grid_columnconfigure(c, weight=1)
+-
+-        ttk.Label(wb_panel, text="fc_hz").grid(row=0, column=0, sticky=tk.W)
+-        self.wb_fc_var = tk.DoubleVar(value=28e9)
+-        ttk.Entry(wb_panel, textvariable=self.wb_fc_var, width=12).grid(row=0, column=1, sticky="w")
+-        ttk.Label(wb_panel, text="bw_hz").grid(row=0, column=2, sticky=tk.W)
+-        self.wb_bw_var = tk.DoubleVar(value=400e6)
+-        ttk.Entry(wb_panel, textvariable=self.wb_bw_var, width=12).grid(row=0, column=3, sticky="w")
+-        ttk.Label(wb_panel, text="n_sc").grid(row=0, column=4, sticky=tk.W)
+-        self.wb_nsc_var = tk.IntVar(value=256)
+-        ttk.Entry(wb_panel, textvariable=self.wb_nsc_var, width=8).grid(row=0, column=5, sticky="w")
+-
+-        ttk.Label(wb_panel, text="Focus r,╬╕,╧ò").grid(row=1, column=0, sticky=tk.W)
+-        self.wb_r_var = tk.DoubleVar(value=8.0)
+-        self.wb_th_var = tk.DoubleVar(value=0.0)
+-        self.wb_ph_var = tk.DoubleVar(value=0.0)
+-        ttk.Entry(wb_panel, textvariable=self.wb_r_var, width=8).grid(row=1, column=1, sticky="w")
+-        ttk.Entry(wb_panel, textvariable=self.wb_th_var, width=8).grid(row=1, column=2, sticky="w")
+-        ttk.Entry(wb_panel, textvariable=self.wb_ph_var, width=8).grid(row=1, column=3, sticky="w")
+-        ttk.Button(wb_panel, text="r,╬╕,╧ò ΓåÆ XYZ", command=self._wb_rtp_to_xyz).grid(row=1, column=4, sticky="w")
+-        ttk.Label(wb_panel, text="x,y,z").grid(row=1, column=5, sticky=tk.E)
+-        self.wb_x_var = tk.DoubleVar(value=0.0)
+-        self.wb_y_var = tk.DoubleVar(value=0.0)
+-        self.wb_z_var = tk.DoubleVar(value=8.0)
+-        ttk.Entry(wb_panel, textvariable=self.wb_x_var, width=8, state="readonly").grid(row=1, column=6, sticky="w")
+-        ttk.Entry(wb_panel, textvariable=self.wb_y_var, width=8, state="readonly").grid(row=1, column=7, sticky="w")
+-        ttk.Entry(wb_panel, textvariable=self.wb_z_var, width=8, state="readonly").grid(row=1, column=8 if 8 < wb_panel.grid_size()[0] else 7, sticky="w")
+-
+-        ttk.Label(wb_panel, text="Array layout").grid(row=2, column=0, sticky=tk.W)
+-        self.wb_layout_var = tk.StringVar(value="upa")
+-        ttk.Combobox(wb_panel, textvariable=self.wb_layout_var, values=["upa", "ula"], state="readonly", width=6).grid(row=2, column=1, sticky="w")
+-        ttk.Label(wb_panel, text="num_x").grid(row=2, column=2, sticky=tk.W)
+-        self.wb_numx_var = tk.IntVar(value=32)
+-        ttk.Entry(wb_panel, textvariable=self.wb_numx_var, width=8).grid(row=2, column=3, sticky="w")
+-        ttk.Label(wb_panel, text="num_y").grid(row=2, column=4, sticky=tk.W)
+-        self.wb_numy_var = tk.IntVar(value=32)
+-        ttk.Entry(wb_panel, textvariable=self.wb_numy_var, width=8).grid(row=2, column=5, sticky="w")
+-        ttk.Label(wb_panel, text="dx (m)").grid(row=3, column=0, sticky=tk.W)
+-        self.wb_dx_var = tk.DoubleVar(value=0.5e-3)
+-        ttk.Entry(wb_panel, textvariable=self.wb_dx_var, width=10).grid(row=3, column=1, sticky="w")
+-        ttk.Label(wb_panel, text="dy (m)").grid(row=3, column=2, sticky=tk.W)
+-        self.wb_dy_var = tk.DoubleVar(value=0.5e-3)
+-        ttk.Entry(wb_panel, textvariable=self.wb_dy_var, width=10).grid(row=3, column=3, sticky="w")
+-
+-        self.wb_save_png_var = tk.BooleanVar(value=False)
+-        self.wb_save_json_var = tk.BooleanVar(value=False)
+-        ttk.Checkbutton(wb_panel, text="Save PNG", variable=self.wb_save_png_var).grid(row=4, column=0, sticky=tk.W)
+-        ttk.Checkbutton(wb_panel, text="Save JSON", variable=self.wb_save_json_var).grid(row=4, column=1, sticky=tk.W)
+-
+-        # Collapse/expand behavior
+-        def _toggle(panel: ttk.Frame, btn: ttk.Button):
+-            if panel.winfo_ismapped():
+-                panel.grid_remove()
+-                btn.configure(text="Γû╢")
+-            else:
+-                panel.grid()
+-                btn.configure(text="Γû╝")
+-        toggle_build.configure(command=lambda: _toggle(build_panel, toggle_build))
+-        toggle_eval.configure(command=lambda: _toggle(eval_panel, toggle_eval))
+-        toggle_wb.configure(command=lambda: _toggle(wb_panel, toggle_wb))
+-
+-        # Advanced fold-out
+-        adv2 = ttk.Labelframe(controls, text="Advanced", padding=(8, 6))
+-        adv2.grid(row=11, column=0, columnspan=2, sticky="ew")
+-        ttk.Label(adv2, text="random_seed").grid(row=0, column=0, sticky=tk.W)
+-        self.adv_seed_var = tk.IntVar(value=1234)
+-        ttk.Entry(adv2, textvariable=self.adv_seed_var, width=10).grid(row=0, column=1, sticky="w")
+-        ttk.Label(adv2, text="n_jobs").grid(row=0, column=2, sticky=tk.W)
+-        self.adv_jobs_var = tk.IntVar(value=-1)
+-        ttk.Entry(adv2, textvariable=self.adv_jobs_var, width=10).grid(row=0, column=3, sticky="w")
+-        ttk.Label(adv2, text="log_level").grid(row=0, column=4, sticky=tk.W)
+-        self.adv_loglvl_var = tk.StringVar(value="INFO")
+-        ttk.Combobox(adv2, textvariable=self.adv_loglvl_var, values=["INFO", "DEBUG"], state="readonly", width=8).grid(row=0, column=5, sticky="w")
+-
+         # Run/Stop buttons
+         action_row = ttk.Frame(controls)
+         action_row.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+@@ -460,7 +1346,6 @@ class MainSimulationGUI:
+             (self.preset_cb, "Predefined system configuration"),
+             (self.mode_cb, "Simulation depth/speed"),
+             (self.users_spin, "Number of users (1-200)"),
+-            (exp_frame, "Advanced experiments: codebooks and wideband TTD vs PS"),
+             (self.run_btn, "Run selected tests with parameters"),
+         ]:
+             _ToolTip(w, t)
+@@ -480,7 +1365,10 @@ class MainSimulationGUI:
+             return
+         selected: List[str] = [k for k, v in self.test_vars.items() if v.get()]
+         if not selected:
+-            self._append_log("No legacy tests selected. Will run experiments if any are checked.\n")
++            # Maybe experiments are selected
++            if not (self.exp_build_cb_var.get() or self.exp_eval_cb_var.get() or self.exp_wideband_cb_var.get()):
++                self._append_log("No tests selected.\n")
++                return
+ 
+         preset = self.preset_var.get() or "standard"
+         mode = self.mode_var.get() or "fast"
+@@ -522,8 +1410,26 @@ class MainSimulationGUI:
+                     _orig_show = None
+                 # Cancellation event shared with simulation processes
+                 self._stop_event = mp.Event()
+-                # Legacy tests first
+-                for name in selected:
++                # Clear experiments cancel flag for this run
++                try:
++                    self.exp_ctrl.cancel_flag.clear()
++                except Exception:
++                    pass
++                # Build experiments selection
++                exp_selected = []
++                if self.exp_build_cb_var.get():
++                    exp_selected.append("Build Spherical Codebook")
++                if self.exp_eval_cb_var.get():
++                    exp_selected.append("Evaluate Codebook Mismatch")
++                if self.exp_wideband_cb_var.get():
++                    exp_selected.append("Wideband: TTD vs Phase")
++                if self.exp_adv_maps_cb_var.get():
++                    exp_selected.append("Advanced AAG/AMAG Maps")
++
++                # If Complete Simulation selected, run original pipeline unchanged
++                run_only_selected_tests = ("Complete Simulation (AAG/AMAG)" in selected)
++
++                for name in (selected if run_only_selected_tests else (selected + exp_selected)):
+                     t0 = time.perf_counter()
+                     if self._closing:
+                         break
+@@ -594,6 +1500,43 @@ class MainSimulationGUI:
+                                 self.root.after(0, lambda p=preset, r=res: self._update_results_view(p, r, None))
+                         except Exception:
+                             pass
++                    elif name == "Build Spherical Codebook":
++                        # Experiments controller path
++                        try:
++                            cfg = self.exp_ctrl.read_ui()
++                            # Wire callbacks
++                            res = run_build_spherical_codebook(cfg)
++                            # Cache codebook for subsequent steps
++                            self.exp_ctrl.set_last_codebook(res)
++                        except Exception as e:
++                            tb = traceback.format_exc()
++                            self._append_log(f"Experiment error: {e}\n{tb}\n")
++                    elif name == "Evaluate Codebook Mismatch":
++                        try:
++                            cfg = self.exp_ctrl.read_ui()
++                            # Use in-memory if available
++                            cb = self.exp_ctrl.get_last_codebook()
++                            if cb is None and not cfg.in_codebook_path:
++                                messagebox.showerror("Codebook required", "No in-memory codebook found and no HDF5 path provided.")
++                            else:
++                                _res = run_eval_codebook_mismatch(cfg, codebook_res=cb)
++                        except Exception as e:
++                            tb = traceback.format_exc()
++                            self._append_log(f"Experiment error: {e}\n{tb}\n")
++                    elif name == "Wideband: TTD vs Phase":
++                        try:
++                            cfg = self.exp_ctrl.read_ui()
++                            _res = run_wideband_compare_ttd_vs_phase(cfg)
++                        except Exception as e:
++                            tb = traceback.format_exc()
++                            self._append_log(f"Experiment error: {e}\n{tb}\n")
++                    elif name == "Advanced AAG/AMAG Maps":
++                        try:
++                            cfg = self.exp_ctrl.read_ui()
++                            _res = run_advanced_aag_amg(cfg, self.exp_ctrl.get_last_codebook())
++                        except Exception as e:
++                            tb = traceback.format_exc()
++                            self._append_log(f"Experiment error: {e}\n{tb}\n")
+                     elif name == "Comparison Analysis":
+                         demo_comparison_analysis()
+                     elif name == "Performance Benchmark":
+@@ -609,47 +1552,6 @@ class MainSimulationGUI:
+                     if self._closing:
+                         break
+                     self._append_log(f"{name} completed in {dt:.2f}s\n")
+-                # Experiments (advanced)
+-                tasks_to_run = []
+-                if self.exp_build_cb_var.get():
+-                    tasks_to_run.append("Build Spherical Codebook")
+-                if self.exp_eval_cb_var.get():
+-                    tasks_to_run.append("Evaluate Codebook Mismatch")
+-                if self.exp_wb_var.get():
+-                    tasks_to_run.append("Wideband: TTD vs Phase")
+-                if tasks_to_run:
+-                    self._append_log("\n=== Experiments (advanced) ===\n")
+-                latest_ck = None
+-                for task in tasks_to_run:
+-                    if self._closing:
+-                        break
+-                    self._schedule_status(f"Running: {task}")
+-                    t0 = time.perf_counter()
+-                    try:
+-                        cfg = self._read_run_config(task)
+-                        if task == "Build Spherical Codebook":
+-                            res = run_build_spherical_codebook(cfg, progress_cb=self._progress_update, is_cancelled=self._is_cancelled)
+-                            latest_ck = res
+-                            self._latest_codebook = res
+-                        elif task == "Evaluate Codebook Mismatch":
+-                            cfg.in_memory_codebook = getattr(self, "_latest_codebook", None)
+-                            res = run_eval_codebook_mismatch(cfg, progress_cb=self._progress_update, is_cancelled=self._is_cancelled)
+-                        elif task == "Wideband: TTD vs Phase":
+-                            res = run_wideband_compare_ttd_vs_phase(cfg, progress_cb=self._progress_update, is_cancelled=self._is_cancelled)
+-                        else:
+-                            res = None
+-                        figs = res.get("figs", []) if isinstance(res, dict) else []
+-                        if figs:
+-                            self._show_figures(figs)
+-                        summary = res.get("summary_text") if isinstance(res, dict) else None
+-                        if summary:
+-                            self._set_summary_text(summary)
+-                        self._append_log(f"{task} done.\n")
+-                    except Exception as e:
+-                        self._append_log(f"{task} error: {e}\n")
+-                    finally:
+-                        dt = time.perf_counter() - t0
+-                        self._append_log(f"{task} completed in {dt:.2f}s\n")
+                 if last_output:
+                     if not self._closing:
+                         self._append_log(f"\nLatest output directory: {last_output}\n")
+@@ -690,6 +1592,10 @@ class MainSimulationGUI:
+         def _do():
+             try:
+                 if running:
++                    if self._progress_determinate:
++                        # Reset to indeterminate for a new run
++                        self.progress.configure(mode="indeterminate")
++                        self._progress_determinate = False
+                     self.progress.start(10)
+                     self.status_var.set("Running...")
+                     self.run_btn.state(["disabled"]) 
+@@ -711,30 +1617,6 @@ class MainSimulationGUI:
+         if not self._closing:
+             self.root.after(0, lambda: self.status_var.set(text))
+ 
+-    def _progress_update(self, frac: float | None = None, text: Optional[str] = None) -> None:
+-        """Thread-safe progress update. frac in [0,1] or None to switch to indeterminate."""
+-        if self._closing:
+-            return
+-        def _do():
+-            try:
+-                if frac is None:
+-                    self.progress.configure(mode="indeterminate")
+-                    self.progress.start(10)
+-                else:
+-                    self.progress.stop()
+-                    self.progress.configure(mode="determinate", maximum=100.0, value=max(0.0, min(1.0, float(frac))) * 100.0)
+-                if text is not None:
+-                    self.status_var.set(text)
+-            except Exception:
+-                pass
+-        self.root.after(0, _do)
+-
+-    def _is_cancelled(self) -> bool:
+-        try:
+-            return bool(getattr(self, '_stop_event', None) and self._stop_event.is_set())
+-        except Exception:
+-            return False
+-
+     def _setup_styles(self) -> None:
+         s = ttk.Style(self.root)
+         try:
+@@ -811,7 +1693,15 @@ class MainSimulationGUI:
+             canvas = FigureCanvasTkAgg(fig, master=self.plots_container)
+             canvas.draw()
+             # Pack without expansion to preserve native size; scrolling shows overflow
+-            canvas.get_tk_widget().pack(side=tk.TOP, anchor='nw', pady=(2, 6))
++            widget = canvas.get_tk_widget()
++            widget.pack(side=tk.TOP, anchor='nw', pady=(2, 0))
++            try:
++                toolbar = NavigationToolbar2Tk(canvas, self.plots_container)
++                toolbar.update()
++                sep = ttk.Separator(self.plots_container, orient='horizontal')
++                sep.pack(fill='x', pady=(2, 6))
++            except Exception:
++                pass
+             self._fig_canvases.append(canvas)
+ 
+         # Update textual summary
+@@ -860,69 +1750,15 @@ class MainSimulationGUI:
+             except Exception:
+                 pass
+ 
+-    def _choose_file(self, var: tk.StringVar, save: bool, defaultextension: str, filetypes):
+-        try:
+-            if save:
+-                path = filedialog.asksaveasfilename(defaultextension=defaultextension, filetypes=filetypes)
+-            else:
+-                path = filedialog.askopenfilename(filetypes=filetypes)
+-            if path:
+-                var.set(path)
+-        except Exception:
+-            pass
+-
+-    def _wb_rtp_to_xyz(self) -> None:
+-        try:
+-            from nearfield.spherical import rtp_to_cartesian
+-            p = rtp_to_cartesian(float(self.wb_r_var.get()), float(self.wb_th_var.get()), float(self.wb_ph_var.get()))
+-            self.wb_x_var.set(float(p[0])); self.wb_y_var.set(float(p[1])); self.wb_z_var.set(float(p[2]))
+-        except Exception as e:
+-            self._append_log(f"rtp->xyz error: {e}\n")
+-
+-    def _show_figures(self, figs: List) -> None:
+-        # Create scrollable area if missing
+-        try:
+-            exists = self.plots_container.winfo_exists()
+-        except Exception:
+-            exists = False
+-        if not exists:
+-            try:
+-                self.plots_canvas = tk.Canvas(self.plots_tab, highlightthickness=0)
+-                self.plots_vscroll = ttk.Scrollbar(self.plots_tab, orient="vertical", command=self.plots_canvas.yview)
+-                self.plots_hscroll = ttk.Scrollbar(self.plots_tab, orient="horizontal", command=self.plots_canvas.xview)
+-                self.plots_canvas.configure(yscrollcommand=self.plots_vscroll.set, xscrollcommand=self.plots_hscroll.set)
+-                self.plots_canvas.grid(row=0, column=0, sticky="nsew")
+-                self.plots_vscroll.grid(row=0, column=1, sticky="ns")
+-                self.plots_hscroll.grid(row=1, column=0, sticky="ew")
+-                self.plots_container = ttk.Frame(self.plots_canvas)
+-                self._plots_window = self.plots_canvas.create_window((0, 0), window=self.plots_container, anchor="nw")
+-                self.plots_container.bind("<Configure>", lambda e: self.plots_canvas.configure(scrollregion=self.plots_canvas.bbox("all")))
+-            except Exception:
+-                return
+-        # Clear and add new
+-        for w in list(self.plots_container.winfo_children()):
+-            try:
+-                w.destroy()
+-            except Exception:
+-                pass
+-        self._fig_canvases.clear()
+-        try:
+-            for fig in figs:
+-                canvas = FigureCanvasTkAgg(fig, master=self.plots_container)
+-                canvas.draw()
+-                canvas.get_tk_widget().pack(side=tk.TOP, anchor='nw', pady=(2, 6))
+-                self._fig_canvases.append(canvas)
+-            # switch to plots tab
+-            self.nb.select(self.plots_tab)
+-        except Exception:
+-            pass
+-
+     def _cancel_run(self) -> None:
+         try:
+             if hasattr(self, '_stop_event') and self._stop_event is not None:
+                 self._stop_event.set()
+                 self._append_log("Cancelling run...\n")
+                 self._schedule_status("Cancelling...")
++            # Experiments cancel flag
++            if hasattr(self, 'exp_ctrl') and self.exp_ctrl is not None:
++                self.exp_ctrl.cancel_flag.set()
+         except Exception:
+             pass
+ 
+@@ -967,301 +1803,342 @@ class MainSimulationGUI:
+         except Exception:
+             pass
+ 
+-
+-@dataclass
+-class RunConfig:
+-    random_seed: int = 1234
+-    n_jobs: int = -1
+-    log_level: str = "INFO"
+-    # codebook build
+-    layout: str = "upa"
+-    num_x: int = 32
+-    num_y: int = 32
+-    dx: float = 0.5e-3
+-    dy: float = 0.5e-3
+-    fc_hz: float = 28e9
+-    r_min: float = 3.0
+-    r_max: float = 20.0
+-    r_step: float = 0.5
+-    theta_range: tuple = (-60.0, 60.0, 5.0)
+-    phi_range: tuple = (-30.0, 30.0, 5.0)
+-    chunk: int = 2048
+-    out_h5: Optional[str] = None
+-    # eval mismatch
+-    Q: int = 200
+-    region: tuple = (-5.0, 5.0, -5.0, 5.0, 2.0, 10.0)
+-    compare_ff: bool = False
+-    in_h5: Optional[str] = None
+-    save_csv: bool = False
+-    save_png: bool = False
+-    in_memory_codebook: Optional[dict] = None
+-    # wideband
+-    wb_fc_hz: float = 28e9
+-    wb_bw_hz: float = 400e6
+-    wb_n_sc: int = 256
+-    focus_rtp: tuple = (8.0, 0.0, 0.0)
+-    wb_layout: str = "upa"
+-    wb_num_x: int = 32
+-    wb_num_y: int = 32
+-    wb_dx: float = 0.5e-3
+-    wb_dy: float = 0.5e-3
+-    wb_save_png: bool = False
+-    wb_save_json: bool = False
+-
+-
+-def run_build_spherical_codebook(cfg: RunConfig, progress_cb=None, is_cancelled=None) -> dict:
+-    from nearfield.geometry import make_array
+-    from nearfield.grids import make_rtp_grid
+-    from nearfield.spherical import spherical_codebook
+-    from nearfield.codebook_io import save_codebook_h5
+-
+-    rng = np.random.default_rng(cfg.random_seed)
+-    layout = cfg.layout
+-    xyz = make_array(layout, num_x=cfg.num_x, num_y=cfg.num_y if layout == "upa" else None, dx=cfg.dx, dy=cfg.dy)
+-    t0, t1, tstep = cfg.theta_range
+-    p0, p1, pstep = cfg.phi_range
+-    theta = np.arange(float(t0), float(t1) + 1e-12, float(tstep))
+-    phi = np.arange(float(p0), float(p1) + 1e-12, float(pstep))
+-    rtp = make_rtp_grid(cfg.r_min, cfg.r_max, cfg.r_step, theta, phi)
+-    K = rtp.shape[0]
+-    M = xyz.shape[0]
+-    print(f"Building spherical codebook: K={K}, M={M}, chunk={cfg.chunk}")
+-    out = np.empty((K, M), dtype=np.complex128)
+-    if progress_cb:
+-        progress_cb(0.0, text="Building codebook...")
+-    built = 0
+-    for s in range(0, K, max(1, int(cfg.chunk))):
+-        if is_cancelled and is_cancelled():
+-            print("Cancelled.")
+-            break
+-        e = min(K, s + int(cfg.chunk))
+-        out[s:e] = spherical_codebook(xyz, cfg.fc_hz, rtp[s:e], chunk=e - s)
+-        built = e
+-        if progress_cb:
+-            progress_cb(built / max(1, K), text=f"Codebook {built}/{K}")
+-    attrs = {
+-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+-        "seed": int(cfg.random_seed),
+-    }
+-    result = {"xyz_m": xyz, "fc_hz": float(cfg.fc_hz), "rtp_grid": rtp, "codebook": out, "attrs": attrs, "figs": []}
+-    if cfg.out_h5:
++    # ============= Plot helpers for experiments =============
++    def _clear_plots(self) -> None:
+         try:
+-            save_codebook_h5(cfg.out_h5, xyz, cfg.fc_hz, rtp, out, attrs=attrs)
+-            print(f"Saved HDF5: {cfg.out_h5}")
+-        except Exception as e:
+-            print(f"Save error: {e}")
+-    return result
+-
+-
+-def run_eval_codebook_mismatch(cfg: RunConfig, progress_cb=None, is_cancelled=None) -> dict:
+-    import matplotlib.pyplot as plt
+-    from nearfield.codebook_io import load_codebook_h5
+-    from nearfield.metrics import quantization_loss_at, farfield_mismatch_loss
+-    from nearfield.spherical import plane_wave_steering
+-
+-    rng = np.random.default_rng(cfg.random_seed)
+-    data = None
+-    if cfg.in_memory_codebook is not None:
+-        data = cfg.in_memory_codebook
+-    elif cfg.in_h5:
+-        data = load_codebook_h5(cfg.in_h5)
+-    else:
+-        raise ValueError("No codebook available. Build first or provide HDF5 path.")
+-    xyz = data["xyz_m"]; fc = data["fc_hz"]; rtp = data["rtp_grid"]; cb = data["codebook"]
+-    Q = int(cfg.Q)
+-    x = rng.uniform(cfg.region[0], cfg.region[1], size=Q)
+-    y = rng.uniform(cfg.region[2], cfg.region[3], size=Q)
+-    z = rng.uniform(cfg.region[4], cfg.region[5], size=Q)
+-    pts = np.column_stack([x, y, z])
+-    if progress_cb:
+-        progress_cb(0.2, text="Computing quantization loss...")
+-    qloss = quantization_loss_at(xyz, fc, rtp, cb, pts)
+-    mismatch = None
+-    if cfg.compare_ff:
+-        if progress_cb:
+-            progress_cb(0.5, text="Computing far-field mismatch...")
+-        K = rtp.shape[0]
+-        M = xyz.shape[0]
+-        cb_ff = np.empty((K, M), dtype=np.complex128)
+-        for i, (r, th, ph) in enumerate(rtp):
+-            cb_ff[i] = plane_wave_steering(xyz, fc, th, ph)
+-        mismatch = farfield_mismatch_loss(xyz, fc, rtp, cb_ff, pts)
+-    if progress_cb:
+-        progress_cb(0.8, text="Rendering plots...")
+-    figs = []
+-    try:
+-        fig, ax = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
+-        ax[0].hist(qloss, bins=30, color="tab:blue", alpha=0.85)
+-        ax[0].set_title("Quantization Loss (dB)"); ax[0].set_xlabel("dB"); ax[0].set_ylabel("Count")
+-        if mismatch is not None:
+-            ax[1].hist(mismatch, bins=30, color="tab:orange", alpha=0.85)
+-            ax[1].set_title("Far-field mismatch (dB)"); ax[1].set_xlabel("dB")
+-        else:
+-            ax[1].axis('off')
+-        figs.append(fig)
+-    except Exception as e:
+-        print(f"Plot error: {e}")
+-    def _stats(arr):
+-        return float(np.mean(arr)), float(np.median(arr)), float(np.std(arr)), float(np.percentile(arr, 95))
+-    m1 = _stats(qloss)
+-    summ_lines = ["Codebook Mismatch Summary\n", f"Quantization loss: mean={m1[0]:.3f} dB, median={m1[1]:.3f} dB, std={m1[2]:.3f} dB, 95th={m1[3]:.3f} dB"]
+-    if mismatch is not None:
+-        m2 = _stats(mismatch)
+-        summ_lines.append(f"Far-field mismatch: mean={m2[0]:.3f} dB, median={m2[1]:.3f} dB, std={m2[2]:.3f} dB, 95th={m2[3]:.3f} dB")
+-    summary_text = "\n".join(summ_lines)
+-    if cfg.save_csv:
+-        try:
+-            path = f"mismatch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+-            with open(path, 'w', encoding='utf-8') as f:
+-                f.write("qloss_db\n"); f.writelines(f"{v}\n" for v in qloss)
+-                if mismatch is not None:
+-                    f.write("mismatch_db\n"); f.writelines(f"{v}\n" for v in mismatch)
+-            print(f"Saved CSV: {path}")
+-        except Exception as e:
+-            print(f"CSV save error: {e}")
+-    if cfg.save_png and figs:
+-        try:
+-            figs[0].savefig("mismatch_hist.png", dpi=120)
+-            print("Saved PNG: mismatch_hist.png")
+-        except Exception as e:
+-            print(f"PNG save error: {e}")
+-    if progress_cb:
+-        progress_cb(1.0, text="Done")
+-    return {"figs": figs, "summary_text": summary_text}
+-
+-
+-def run_wideband_compare_ttd_vs_phase(cfg: RunConfig, progress_cb=None, is_cancelled=None) -> dict:
+-    import matplotlib.pyplot as plt
+-    from nearfield.geometry import make_array
+-    from nearfield.spherical import rtp_to_cartesian
+-    from nearfield.wideband import subcarrier_frequencies, spherical_steering_wideband
+-    from nearfield.beamformer.phase import design_phase_shifter_weights, weights_over_band_phase_shifter
+-    from nearfield.beamformer.ttd import design_ttd_delays, weights_over_band_ttd
+-    from nearfield.metrics_wideband import (
+-        beampattern_gain_spectrum,
+-        gain_flatness_db,
+-        beam_squint_deg,
+-        achievable_rate_bpshz,
+-    )
++            for w in list(self.plots_container.winfo_children()):
++                try:
++                    w.destroy()
++                except Exception:
++                    pass
++            self._fig_canvases.clear()
++        except Exception:
++            pass
+ 
+-    if progress_cb:
+-        progress_cb(0.0, text="Preparing wideband compare...")
+-    layout = cfg.wb_layout
+-    xyz = make_array(layout, num_x=cfg.wb_num_x, num_y=cfg.wb_num_y if layout == "upa" else None, dx=cfg.wb_dx, dy=cfg.wb_dy)
+-    f = subcarrier_frequencies(cfg.wb_fc_hz, cfg.wb_bw_hz, cfg.wb_n_sc)
+-    p = rtp_to_cartesian(*cfg.focus_rtp)
+-    if progress_cb:
+-        progress_cb(0.2, text="Computing steering across band...")
+-    A = spherical_steering_wideband(xyz, p, f)
+-    if is_cancelled and is_cancelled():
+-        print("Cancelled.")
+-        return {"figs": [], "summary_text": "Cancelled."}
+-    if progress_cb:
+-        progress_cb(0.4, text="Designing PS/TTD weights...")
+-    w_fc = design_phase_shifter_weights(xyz, cfg.wb_fc_hz, p)
+-    W_ps = weights_over_band_phase_shifter(w_fc, f.size)
+-    d = design_ttd_delays(xyz, p)
+-    W_ttd = weights_over_band_ttd(d, f)
+-    if progress_cb:
+-        progress_cb(0.6, text="Evaluating performance metrics...")
+-    g_ps = beampattern_gain_spectrum(W_ps, A)
+-    g_ttd = beampattern_gain_spectrum(W_ttd, A)
+-    flat_ps = gain_flatness_db(g_ps)
+-    flat_ttd = gain_flatness_db(g_ttd)
+-    squint_ps = beam_squint_deg(xyz, cfg.wb_fc_hz, W_ps, f, r_fixed_m=cfg.focus_rtp[0])
+-    squint_ttd = beam_squint_deg(xyz, cfg.wb_fc_hz, W_ttd, f, r_fixed_m=cfg.focus_rtp[0])
+-    rate_ps = achievable_rate_bpshz(g_ps, noise_psd_w_hz=1e-17, subcarrier_bw_hz=cfg.wb_bw_hz / f.size)
+-    rate_ttd = achievable_rate_bpshz(g_ttd, noise_psd_w_hz=1e-17, subcarrier_bw_hz=cfg.wb_bw_hz / f.size)
+-    if progress_cb:
+-        progress_cb(0.8, text="Rendering plot...")
+-    figs = []
+-    try:
+-        f_off = (f - cfg.wb_fc_hz) / 1e6
+-        fig, ax = plt.subplots(1, 1, figsize=(7, 4), constrained_layout=True)
+-        ax.plot(f_off, 10 * np.log10(g_ps + 1e-16), label="PS")
+-        ax.plot(f_off, 10 * np.log10(g_ttd + 1e-16), label="TTD")
+-        ax.set_xlabel("Frequency offset (MHz)"); ax.set_ylabel("Gain (dB)"); ax.set_title("Wideband beampattern gain")
+-        ax.grid(True, ls=":"); ax.legend()
+-        figs.append(fig)
+-        if cfg.wb_save_png:
+-            fig.savefig("wb_gain.png", dpi=120)
+-    except Exception as e:
+-        print(f"Plot error: {e}")
+-    summary = (
+-        f"Wideband Compare (TTD vs PS)\n"
+-        f"flatness_PS_dB={flat_ps:.2f}, flatness_TTD_dB={flat_ttd:.2f}\n"
+-        f"squint_PS_deg={squint_ps:.2f}, squint_TTD_deg={squint_ttd:.2f}\n"
+-        f"rate_PS={rate_ps:.3f} bps/Hz, rate_TTD={rate_ttd:.3f} bps/Hz\n"
+-    )
+-    if cfg.wb_save_json:
++    def _add_figure(self, fig) -> None:
+         try:
+-            path = "wb_summary.json"
+-            with open(path, 'w', encoding='utf-8') as fjs:
+-                json.dump({
+-                    "flatness_PS_dB": flat_ps,
+-                    "flatness_TTD_dB": flat_ttd,
+-                    "squint_PS_deg": squint_ps,
+-                    "squint_TTD_deg": squint_ttd,
+-                    "rate_PS_bpsHz": rate_ps,
+-                    "rate_TTD_bpsHz": rate_ttd,
+-                }, fjs, indent=2)
+-            print(f"Saved JSON: {path}")
+-        except Exception as e:
+-            print(f"JSON save error: {e}")
+-    if progress_cb:
+-        progress_cb(1.0, text="Done")
+-    return {"figs": figs, "summary_text": summary}
+-
+-
+-def _read_codebook_ranges(self) -> tuple:
+-    return (
+-        float(self.sc_rmin_var.get()),
+-        float(self.sc_rmax_var.get()),
+-        float(self.sc_rstep_var.get()),
+-        (float(self.sc_tstart_var.get()), float(self.sc_tstop_var.get()), float(self.sc_tstep_var.get())),
+-        (float(self.sc_pstart_var.get()), float(self.sc_pstop_var.get()), float(self.sc_pstep_var.get())),
+-    )
++            canvas = FigureCanvasTkAgg(fig, master=self.plots_container)
++            canvas.draw()
++            widget = canvas.get_tk_widget()
++            widget.pack(side=tk.TOP, anchor='nw', pady=(2, 0))
++            # Add Matplotlib toolbar for zoom/pan and save
++            try:
++                toolbar = NavigationToolbar2Tk(canvas, self.plots_container)
++                toolbar.update()
++                # Subtle spacing between multiple figures
++                sep = ttk.Separator(self.plots_container, orient='horizontal')
++                sep.pack(fill='x', pady=(2, 6))
++            except Exception:
++                pass
++            self._fig_canvases.append(canvas)
++            try:
++                if not self._closing:
++                    self.nb.select(self.plots_tab)
++            except Exception:
++                pass
++        except Exception:
++            pass
+ 
++    def _set_progress_fraction(self, frac: Optional[float] = None) -> None:
++        """Set determinate fraction [0,1]; if None revert to indeterminate."""
++        try:
++            if frac is None:
++                if self._progress_determinate:
++                    self.progress.configure(mode="indeterminate")
++                    self.progress.start(10)
++                    self._progress_determinate = False
++                return
++            frac = max(0.0, min(1.0, float(frac)))
++            if not self._progress_determinate:
++                self.progress.stop()
++                self.progress.configure(mode="determinate", maximum=100.0)
++                self._progress_determinate = True
++            self.progress['value'] = 100.0 * frac
++        except Exception:
++            pass
+ 
+-def _read_eval_region(self) -> tuple:
+-    return (
+-        float(self.ev_xmin.get()), float(self.ev_xmax.get()),
+-        float(self.ev_ymin.get()), float(self.ev_ymax.get()),
+-        float(self.ev_zmin.get()), float(self.ev_zmax.get()),
+-    )
++    # ============= Experiments UI =============
++    def _build_experiments_section(self, parent: ttk.Frame, row: int) -> None:
++        wrapper = ttk.Labelframe(parent, text="Experiments (advanced)", padding=(10, 8))
++        wrapper.grid(row=row, column=0, columnspan=2, sticky="nsew")
++        wrapper.grid_columnconfigure(0, weight=1)
+ 
++        # Primary checkboxes
++        cb_row = ttk.Frame(wrapper)
++        cb_row.grid(row=0, column=0, sticky="ew", pady=(0, 6))
++        self.exp_build_cb_var = tk.BooleanVar(value=False)
++        self.exp_eval_cb_var = tk.BooleanVar(value=False)
++        self.exp_wideband_cb_var = tk.BooleanVar(value=False)
++        self.exp_adv_maps_cb_var = tk.BooleanVar(value=False)
++        ttk.Checkbutton(cb_row, text="Build Spherical Codebook", variable=self.exp_build_cb_var).pack(side=tk.LEFT)
++        ttk.Checkbutton(cb_row, text="Evaluate Codebook Mismatch", variable=self.exp_eval_cb_var).pack(side=tk.LEFT, padx=(10, 0))
++        ttk.Checkbutton(cb_row, text="Wideband: TTD vs Phase", variable=self.exp_wideband_cb_var).pack(side=tk.LEFT, padx=(10, 0))
++        ttk.Checkbutton(cb_row, text="Advanced AAG/AMAG Maps", variable=self.exp_adv_maps_cb_var).pack(side=tk.LEFT, padx=(10, 0))
++
++        # Collapsible panels helper
++        def make_fold(parent_frame: ttk.Frame, title: str, r_index: int):
++            header = ttk.Frame(parent_frame)
++            header.grid(row=r_index, column=0, sticky="ew")
++            header.grid_columnconfigure(0, weight=1)
++            var = tk.BooleanVar(value=True)
++            btn = ttk.Button(header, text="Γû╝ " + title, width=32)
++            btn.grid(row=0, column=0, sticky=tk.W)
++            body = ttk.Frame(parent_frame)
++            body.grid(row=r_index + 1, column=0, sticky="ew", pady=(4, 8))
++            def toggle():
++                if var.get():
++                    var.set(False)
++                    btn.configure(text="Γû║ " + title)
++                    body.grid_remove()
++                else:
++                    var.set(True)
++                    btn.configure(text="Γû╝ " + title)
++                    body.grid()
++            btn.configure(command=toggle)
++            return body
++
++        r = 1
++        # 1) Spherical Codebook panel
++        sc_body = make_fold(wrapper, "Spherical Codebook", r)
++        r += 2
++        # Array layout/size
++        ttk.Label(sc_body, text="Array layout").grid(row=0, column=0, sticky=tk.W)
++        self.sc_layout_var = tk.StringVar(value="upa")
++        ttk.Combobox(sc_body, textvariable=self.sc_layout_var, values=["upa", "ula"], width=8, state="readonly").grid(row=0, column=1, sticky=tk.W)
++        ttk.Label(sc_body, text="num_x").grid(row=0, column=2, sticky=tk.W, padx=(6, 0))
++        self.sc_numx_var = tk.IntVar(value=8)
++        ttk.Entry(sc_body, textvariable=self.sc_numx_var, width=6).grid(row=0, column=3, sticky=tk.W)
++        ttk.Label(sc_body, text="num_y").grid(row=0, column=4, sticky=tk.W, padx=(6, 0))
++        self.sc_numy_var = tk.IntVar(value=8)
++        ttk.Entry(sc_body, textvariable=self.sc_numy_var, width=6).grid(row=0, column=5, sticky=tk.W)
++        ttk.Label(sc_body, text="dx (m)").grid(row=1, column=0, sticky=tk.W)
++        self.sc_dx_var = tk.DoubleVar(value=0.005)
++        ttk.Entry(sc_body, textvariable=self.sc_dx_var, width=8).grid(row=1, column=1, sticky=tk.W)
++        ttk.Label(sc_body, text="dy (m)").grid(row=1, column=2, sticky=tk.W, padx=(6, 0))
++        self.sc_dy_var = tk.DoubleVar(value=0.005)
++        ttk.Entry(sc_body, textvariable=self.sc_dy_var, width=8).grid(row=1, column=3, sticky=tk.W)
++        # Frequencies and grid
++        ttk.Label(sc_body, text="fc_hz").grid(row=2, column=0, sticky=tk.W)
++        self.sc_fc_var = tk.DoubleVar(value=28e9)
++        ttk.Entry(sc_body, textvariable=self.sc_fc_var, width=14).grid(row=2, column=1, sticky=tk.W)
++        ttk.Label(sc_body, text="r_min").grid(row=3, column=0, sticky=tk.W)
++        self.sc_rmin_var = tk.DoubleVar(value=1.0)
++        ttk.Entry(sc_body, textvariable=self.sc_rmin_var, width=10).grid(row=3, column=1, sticky=tk.W)
++        ttk.Label(sc_body, text="r_max").grid(row=3, column=2, sticky=tk.W, padx=(6, 0))
++        self.sc_rmax_var = tk.DoubleVar(value=5.0)
++        ttk.Entry(sc_body, textvariable=self.sc_rmax_var, width=10).grid(row=3, column=3, sticky=tk.W)
++        ttk.Label(sc_body, text="r_step").grid(row=3, column=4, sticky=tk.W, padx=(6, 0))
++        self.sc_rstep_var = tk.DoubleVar(value=0.5)
++        ttk.Entry(sc_body, textvariable=self.sc_rstep_var, width=10).grid(row=3, column=5, sticky=tk.W)
++        ttk.Label(sc_body, text="theta start/stop/step (deg)").grid(row=4, column=0, sticky=tk.W, columnspan=2)
++        self.sc_th_start_var = tk.DoubleVar(value=-60.0)
++        self.sc_th_stop_var = tk.DoubleVar(value=60.0)
++        self.sc_th_step_var = tk.DoubleVar(value=5.0)
++        ttk.Entry(sc_body, textvariable=self.sc_th_start_var, width=8).grid(row=4, column=2, sticky=tk.W)
++        ttk.Entry(sc_body, textvariable=self.sc_th_stop_var, width=8).grid(row=4, column=3, sticky=tk.W)
++        ttk.Entry(sc_body, textvariable=self.sc_th_step_var, width=8).grid(row=4, column=5, sticky=tk.W)
++        ttk.Label(sc_body, text="phi start/stop/step (deg)").grid(row=5, column=0, sticky=tk.W, columnspan=2)
++        self.sc_ph_start_var = tk.DoubleVar(value=-20.0)
++        self.sc_ph_stop_var = tk.DoubleVar(value=20.0)
++        self.sc_ph_step_var = tk.DoubleVar(value=5.0)
++        ttk.Entry(sc_body, textvariable=self.sc_ph_start_var, width=8).grid(row=5, column=2, sticky=tk.W)
++        ttk.Entry(sc_body, textvariable=self.sc_ph_stop_var, width=8).grid(row=5, column=3, sticky=tk.W)
++        ttk.Entry(sc_body, textvariable=self.sc_ph_step_var, width=8).grid(row=5, column=5, sticky=tk.W)
++        ttk.Label(sc_body, text="chunk").grid(row=6, column=0, sticky=tk.W)
++        self.sc_chunk_var = tk.IntVar(value=2048)
++        ttk.Entry(sc_body, textvariable=self.sc_chunk_var, width=10).grid(row=6, column=1, sticky=tk.W)
++        # Output path
++        ttk.Label(sc_body, text="Output HDF5").grid(row=7, column=0, sticky=tk.W)
++        self.sc_out_path_var = tk.StringVar(value="")
++        ttk.Entry(sc_body, textvariable=self.sc_out_path_var, width=32).grid(row=7, column=1, columnspan=3, sticky="ew")
++        ttk.Button(sc_body, text="Browse...", command=lambda: self._choose_file(self.sc_out_path_var, save=True, defname="codebook.h5", filetypes=[("HDF5","*.h5")])).grid(row=7, column=4, sticky=tk.W)
++
++        # 2) Evaluate Codebook Mismatch
++        ev_body = make_fold(wrapper, "Evaluate Codebook Mismatch", r)
++        r += 2
++        ttk.Label(ev_body, text="Q").grid(row=0, column=0, sticky=tk.W)
++        self.ev_Q_var = tk.IntVar(value=200)
++        ttk.Entry(ev_body, textvariable=self.ev_Q_var, width=8).grid(row=0, column=1, sticky=tk.W)
++        ttk.Label(ev_body, text="x_min/x_max").grid(row=1, column=0, sticky=tk.W)
++        self.ev_xmin_var = tk.DoubleVar(value=-2.0)
++        self.ev_xmax_var = tk.DoubleVar(value=2.0)
++        ttk.Entry(ev_body, textvariable=self.ev_xmin_var, width=8).grid(row=1, column=1, sticky=tk.W)
++        ttk.Entry(ev_body, textvariable=self.ev_xmax_var, width=8).grid(row=1, column=2, sticky=tk.W)
++        ttk.Label(ev_body, text="y_min/y_max").grid(row=2, column=0, sticky=tk.W)
++        self.ev_ymin_var = tk.DoubleVar(value=-2.0)
++        self.ev_ymax_var = tk.DoubleVar(value=2.0)
++        ttk.Entry(ev_body, textvariable=self.ev_ymin_var, width=8).grid(row=2, column=1, sticky=tk.W)
++        ttk.Entry(ev_body, textvariable=self.ev_ymax_var, width=8).grid(row=2, column=2, sticky=tk.W)
++        ttk.Label(ev_body, text="z_min/z_max").grid(row=3, column=0, sticky=tk.W)
++        self.ev_zmin_var = tk.DoubleVar(value=1.0)
++        self.ev_zmax_var = tk.DoubleVar(value=5.0)
++        ttk.Entry(ev_body, textvariable=self.ev_zmin_var, width=8).grid(row=3, column=1, sticky=tk.W)
++        ttk.Entry(ev_body, textvariable=self.ev_zmax_var, width=8).grid(row=3, column=2, sticky=tk.W)
++        self.ev_compare_ff_var = tk.BooleanVar(value=False)
++        ttk.Checkbutton(ev_body, text="Compare with plane-wave codebook (FF)", variable=self.ev_compare_ff_var).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
++        ttk.Label(ev_body, text="Input codebook HDF5").grid(row=5, column=0, sticky=tk.W)
++        self.ev_in_path_var = tk.StringVar(value="")
++        ttk.Entry(ev_body, textvariable=self.ev_in_path_var, width=32).grid(row=5, column=1, columnspan=2, sticky="ew")
++        ttk.Button(ev_body, text="Browse...", command=lambda: self._choose_file(self.ev_in_path_var, save=False, filetypes=[("HDF5","*.h5")])).grid(row=5, column=3, sticky=tk.W)
++        self.ev_save_csv_var = tk.BooleanVar(value=False)
++        self.ev_save_png_var = tk.BooleanVar(value=False)
++        self.ev_save_html_var = tk.BooleanVar(value=False)
++        ttk.Checkbutton(ev_body, text="Save CSV", variable=self.ev_save_csv_var).grid(row=6, column=0, sticky=tk.W)
++        ttk.Checkbutton(ev_body, text="Save PNG", variable=self.ev_save_png_var).grid(row=6, column=1, sticky=tk.W)
++        ttk.Checkbutton(ev_body, text="Save HTML (interactive)", variable=self.ev_save_html_var).grid(row=6, column=2, sticky=tk.W)
++
++        # 3) Wideband: TTD vs Phase
++        wb_body = make_fold(wrapper, "Wideband: TTD vs Phase", r)
++        r += 2
++        ttk.Label(wb_body, text="fc_hz").grid(row=0, column=0, sticky=tk.W)
++        self.wb_fc_var = tk.DoubleVar(value=28e9)
++        ttk.Entry(wb_body, textvariable=self.wb_fc_var, width=14).grid(row=0, column=1, sticky=tk.W)
++        ttk.Label(wb_body, text="bw_hz").grid(row=0, column=2, sticky=tk.W)
++        self.wb_bw_var = tk.DoubleVar(value=1e9)
++        ttk.Entry(wb_body, textvariable=self.wb_bw_var, width=14).grid(row=0, column=3, sticky=tk.W)
++        ttk.Label(wb_body, text="n_sc").grid(row=0, column=4, sticky=tk.W)
++        self.wb_nsc_var = tk.IntVar(value=64)
++        ttk.Entry(wb_body, textvariable=self.wb_nsc_var, width=8).grid(row=0, column=5, sticky=tk.W)
++        # Focus point r,theta,phi
++        ttk.Label(wb_body, text="Focus r, theta, phi (deg)").grid(row=1, column=0, sticky=tk.W, columnspan=2)
++        self.wb_r_var = tk.DoubleVar(value=2.0)
++        self.wb_theta_var = tk.DoubleVar(value=0.0)
++        self.wb_phi_var = tk.DoubleVar(value=0.0)
++        ttk.Entry(wb_body, textvariable=self.wb_r_var, width=10).grid(row=1, column=2, sticky=tk.W)
++        ttk.Entry(wb_body, textvariable=self.wb_theta_var, width=10).grid(row=1, column=3, sticky=tk.W)
++        ttk.Entry(wb_body, textvariable=self.wb_phi_var, width=10).grid(row=1, column=5, sticky=tk.W)
++        self._wb_xyz_label = ttk.Label(wb_body, text="XYZ: (ΓÇö)")
++        self._wb_xyz_label.grid(row=2, column=0, columnspan=4, sticky=tk.W)
++        ttk.Button(wb_body, text="Use r,╬╕,╧òΓåÆXYZ", command=self._update_wb_xyz_preview).grid(row=1, column=6, sticky=tk.W, padx=(6, 0))
++        # Array layout same as spherical
++        ttk.Label(wb_body, text="Array layout").grid(row=3, column=0, sticky=tk.W)
++        # Use same variables sc_layout_var/numx/numy/dx/dy for simplicity
++        ttk.Label(wb_body, textvariable=self.sc_layout_var).grid(row=3, column=1, sticky=tk.W)
++        ttk.Label(wb_body, text="num_x/num_y").grid(row=3, column=2, sticky=tk.W)
++        ttk.Label(wb_body, textvariable=self.sc_numx_var).grid(row=3, column=3, sticky=tk.W)
++        ttk.Label(wb_body, textvariable=self.sc_numy_var).grid(row=3, column=4, sticky=tk.W)
++        ttk.Label(wb_body, text="dx/dy (m)").grid(row=3, column=5, sticky=tk.W)
++        ttk.Label(wb_body, textvariable=self.sc_dx_var).grid(row=3, column=6, sticky=tk.W)
++        ttk.Label(wb_body, textvariable=self.sc_dy_var).grid(row=3, column=7, sticky=tk.W)
++        # Output options
++        self.wb_save_png_var = tk.BooleanVar(value=False)
++        self.wb_save_json_var = tk.BooleanVar(value=False)
++        self.wb_save_html_var = tk.BooleanVar(value=False)
++        ttk.Checkbutton(wb_body, text="Save plots (PNG)", variable=self.wb_save_png_var).grid(row=4, column=0, sticky=tk.W)
++        ttk.Checkbutton(wb_body, text="Save summary (JSON)", variable=self.wb_save_json_var).grid(row=4, column=1, sticky=tk.W)
++        ttk.Checkbutton(wb_body, text="Save HTML (interactive)", variable=self.wb_save_html_var).grid(row=4, column=2, sticky=tk.W)
++
++        # Advanced overrides for experiments
++        adv_body = make_fold(wrapper, "Advanced overrides", r)
++        r += 2
++        ttk.Label(adv_body, text="n_jobs").grid(row=0, column=0, sticky=tk.W)
++        self.exp_njobs_var = tk.IntVar(value=-1)
++        ttk.Entry(adv_body, textvariable=self.exp_njobs_var, width=10).grid(row=0, column=1, sticky=tk.W)
++        ttk.Label(adv_body, text="seed").grid(row=0, column=2, sticky=tk.W)
++        self.exp_seed_var = tk.StringVar(value="")
++        ttk.Entry(adv_body, textvariable=self.exp_seed_var, width=10).grid(row=0, column=3, sticky=tk.W)
++        ttk.Label(adv_body, text="log level").grid(row=0, column=4, sticky=tk.W)
++        self.exp_loglevel_var = tk.StringVar(value="INFO")
++        ttk.Combobox(adv_body, textvariable=self.exp_loglevel_var, values=["DEBUG","INFO","WARNING","ERROR"], width=10, state="readonly").grid(row=0, column=5, sticky=tk.W)
++
++        # Advanced AAG/AMAG maps panel
++        maps_body = make_fold(wrapper, "Advanced AAG/AMAG Maps", r)
++        r += 2
++        # Array
++        ttk.Label(maps_body, text="Array").grid(row=0, column=0, sticky=tk.W)
++        self.adv_layout_var = tk.StringVar(value="upa")
++        ttk.Combobox(maps_body, textvariable=self.adv_layout_var, values=["upa","ula"], width=8, state="readonly").grid(row=0, column=1, sticky=tk.W)
++        ttk.Label(maps_body, text="num_x").grid(row=0, column=2, sticky=tk.W)
++        self.adv_numx_var = tk.IntVar(value=16)
++        ttk.Entry(maps_body, textvariable=self.adv_numx_var, width=6).grid(row=0, column=3, sticky=tk.W)
++        ttk.Label(maps_body, text="num_y").grid(row=0, column=4, sticky=tk.W)
++        self.adv_numy_var = tk.IntVar(value=16)
++        ttk.Entry(maps_body, textvariable=self.adv_numy_var, width=6).grid(row=0, column=5, sticky=tk.W)
++        ttk.Label(maps_body, text="dx (m)").grid(row=1, column=0, sticky=tk.W)
++        self.adv_dx_var = tk.DoubleVar(value=0.005)
++        ttk.Entry(maps_body, textvariable=self.adv_dx_var, width=8).grid(row=1, column=1, sticky=tk.W)
++        ttk.Label(maps_body, text="dy (m)").grid(row=1, column=2, sticky=tk.W)
++        self.adv_dy_var = tk.DoubleVar(value=0.005)
++        ttk.Entry(maps_body, textvariable=self.adv_dy_var, width=8).grid(row=1, column=3, sticky=tk.W)
++        # Carrier and map type
++        ttk.Label(maps_body, text="fc_hz").grid(row=2, column=0, sticky=tk.W)
++        self.adv_fc_var = tk.DoubleVar(value=28e9)
++        ttk.Entry(maps_body, textvariable=self.adv_fc_var, width=14).grid(row=2, column=1, sticky=tk.W)
++        ttk.Label(maps_body, text="Map Type").grid(row=2, column=2, sticky=tk.W)
++        self.adv_map_type_var = tk.StringVar(value="Angular 2D (╬╕ΓÇô╧ò @ r)")
++        ttk.Combobox(maps_body, textvariable=self.adv_map_type_var, values=["Angular 2D (╬╕ΓÇô╧ò @ r)", "Radial Slice (r @ ╬╕,╧ò)"], state="readonly").grid(row=2, column=3, columnspan=3, sticky="ew")
++        # Angular 2D params
++        ttk.Label(maps_body, text="r_fixed (m)").grid(row=3, column=0, sticky=tk.W)
++        self.adv_rfixed_var = tk.DoubleVar(value=5.0)
++        ttk.Entry(maps_body, textvariable=self.adv_rfixed_var, width=10).grid(row=3, column=1, sticky=tk.W)
++        ttk.Label(maps_body, text="╬╕ start/stop/step").grid(row=4, column=0, sticky=tk.W)
++        self.adv_th_start_var = tk.DoubleVar(value=-60.0)
++        self.adv_th_stop_var = tk.DoubleVar(value=60.0)
++        self.adv_th_step_var = tk.DoubleVar(value=5.0)
++        ttk.Entry(maps_body, textvariable=self.adv_th_start_var, width=8).grid(row=4, column=1, sticky=tk.W)
++        ttk.Entry(maps_body, textvariable=self.adv_th_stop_var, width=8).grid(row=4, column=2, sticky=tk.W)
++        ttk.Entry(maps_body, textvariable=self.adv_th_step_var, width=8).grid(row=4, column=3, sticky=tk.W)
++        ttk.Label(maps_body, text="╧ò start/stop/step").grid(row=5, column=0, sticky=tk.W)
++        self.adv_ph_start_var = tk.DoubleVar(value=-20.0)
++        self.adv_ph_stop_var = tk.DoubleVar(value=20.0)
++        self.adv_ph_step_var = tk.DoubleVar(value=5.0)
++        ttk.Entry(maps_body, textvariable=self.adv_ph_start_var, width=8).grid(row=5, column=1, sticky=tk.W)
++        ttk.Entry(maps_body, textvariable=self.adv_ph_stop_var, width=8).grid(row=5, column=2, sticky=tk.W)
++        ttk.Entry(maps_body, textvariable=self.adv_ph_step_var, width=8).grid(row=5, column=3, sticky=tk.W)
++        # Radial slice params
++        ttk.Label(maps_body, text="r_min/max/step").grid(row=6, column=0, sticky=tk.W)
++        self.adv_rmin_var = tk.DoubleVar(value=1.0)
++        self.adv_rmax_var = tk.DoubleVar(value=10.0)
++        self.adv_rstep_var = tk.DoubleVar(value=0.5)
++        ttk.Entry(maps_body, textvariable=self.adv_rmin_var, width=8).grid(row=6, column=1, sticky=tk.W)
++        ttk.Entry(maps_body, textvariable=self.adv_rmax_var, width=8).grid(row=6, column=2, sticky=tk.W)
++        ttk.Entry(maps_body, textvariable=self.adv_rstep_var, width=8).grid(row=6, column=3, sticky=tk.W)
++        ttk.Label(maps_body, text="╬╕, ╧ò (deg)").grid(row=6, column=4, sticky=tk.W)
++        self.adv_theta_var = tk.DoubleVar(value=0.0)
++        self.adv_phi_var = tk.DoubleVar(value=0.0)
++        ttk.Entry(maps_body, textvariable=self.adv_theta_var, width=8).grid(row=6, column=5, sticky=tk.W)
++        ttk.Entry(maps_body, textvariable=self.adv_phi_var, width=8).grid(row=6, column=6, sticky=tk.W)
++        # Weighting
++        ttk.Label(maps_body, text="Weighting").grid(row=7, column=0, sticky=tk.W)
++        self.adv_weighting_var = tk.StringVar(value="Ideal (AMAG)")
++        ttk.Combobox(maps_body, textvariable=self.adv_weighting_var, values=["Ideal (AMAG)", "Codebook-selected (AAG)"], state="readonly").grid(row=7, column=1, columnspan=2, sticky="ew")
++        self.adv_compare_ff_var = tk.BooleanVar(value=False)
++        ttk.Checkbutton(maps_body, text="Compare Far-field", variable=self.adv_compare_ff_var).grid(row=7, column=3, sticky=tk.W)
++        # Codebook
++        self.adv_use_inmem_cb_var = tk.BooleanVar(value=True)
++        ttk.Checkbutton(maps_body, text="Use in-memory codebook", variable=self.adv_use_inmem_cb_var).grid(row=8, column=0, columnspan=2, sticky=tk.W)
++        ttk.Label(maps_body, text="Codebook HDF5").grid(row=8, column=2, sticky=tk.W)
++        self.adv_cb_path_var = tk.StringVar(value="")
++        ttk.Entry(maps_body, textvariable=self.adv_cb_path_var, width=28).grid(row=8, column=3, columnspan=3, sticky="ew")
++        ttk.Button(maps_body, text="Browse...", command=lambda: self._choose_file(self.adv_cb_path_var, save=False, filetypes=[("HDF5","*.h5")])).grid(row=8, column=6, sticky=tk.W)
++        # Output
++        self.adv_save_html_var = tk.BooleanVar(value=True)
++        self.adv_save_csv_var = tk.BooleanVar(value=False)
++        self.adv_save_png_var = tk.BooleanVar(value=False)
++        ttk.Checkbutton(maps_body, text="Save HTML (interactive)", variable=self.adv_save_html_var).grid(row=9, column=0, sticky=tk.W)
++        ttk.Checkbutton(maps_body, text="Save CSV", variable=self.adv_save_csv_var).grid(row=9, column=1, sticky=tk.W)
++        ttk.Checkbutton(maps_body, text="Save PNG", variable=self.adv_save_png_var).grid(row=9, column=2, sticky=tk.W)
++        ttk.Label(maps_body, text="chunk").grid(row=9, column=3, sticky=tk.W)
++        self.adv_chunk_var = tk.IntVar(value=2048)
++        ttk.Entry(maps_body, textvariable=self.adv_chunk_var, width=10).grid(row=9, column=4, sticky=tk.W)
++
++    def _choose_file(self, var: tk.StringVar, save: bool, defname: str | None = None, filetypes: list | None = None) -> None:
++        try:
++            if save:
++                path = filedialog.asksaveasfilename(defaultextension=".h5", initialfile=(defname or ""), filetypes=filetypes or [("HDF5","*.h5"),("All","*.*")])
++            else:
++                path = filedialog.askopenfilename(filetypes=filetypes or [("HDF5","*.h5"),("All","*.*")])
++            if path:
++                var.set(path)
++        except Exception:
++            pass
+ 
+-def _read_run_config(self, task_name: str) -> RunConfig:
+-    seed = int(self.adv_seed_var.get())
+-    n_jobs = int(self.adv_jobs_var.get())
+-    lvl = self.adv_loglvl_var.get() or "INFO"
+-    cfg = RunConfig(random_seed=seed, n_jobs=n_jobs, log_level=lvl)
+-    if task_name == "Build Spherical Codebook":
+-        rmin, rmax, rstep, tr, pr = _read_codebook_ranges(self)
+-        cfg.layout = self.sc_layout_var.get() or "upa"
+-        cfg.num_x = int(self.sc_numx_var.get())
+-        cfg.num_y = int(self.sc_numy_var.get())
+-        cfg.dx = float(self.sc_dx_var.get()); cfg.dy = float(self.sc_dy_var.get())
+-        cfg.fc_hz = float(self.sc_fc_var.get())
+-        cfg.r_min = float(rmin); cfg.r_max = float(rmax); cfg.r_step = float(rstep)
+-        cfg.theta_range = tr; cfg.phi_range = pr
+-        cfg.chunk = int(self.sc_chunk_var.get())
+-        cfg.out_h5 = self.sc_out_path_var.get() or None
+-    elif task_name == "Evaluate Codebook Mismatch":
+-        cfg.Q = int(self.ev_q_var.get())
+-        cfg.region = _read_eval_region(self)
+-        cfg.compare_ff = bool(self.ev_compare_ff_var.get())
+-        cfg.in_h5 = self.ev_in_path_var.get() or None
+-        cfg.save_csv = bool(self.ev_save_csv_var.get())
+-        cfg.save_png = bool(self.ev_save_png_var.get())
+-    elif task_name == "Wideband: TTD vs Phase":
+-        cfg.wb_fc_hz = float(self.wb_fc_var.get()); cfg.wb_bw_hz = float(self.wb_bw_var.get()); cfg.wb_n_sc = int(self.wb_nsc_var.get())
+-        cfg.focus_rtp = (float(self.wb_r_var.get()), float(self.wb_th_var.get()), float(self.wb_ph_var.get()))
+-        cfg.wb_layout = self.wb_layout_var.get() or "upa"
+-        cfg.wb_num_x = int(self.wb_numx_var.get()); cfg.wb_num_y = int(self.wb_numy_var.get())
+-        cfg.wb_dx = float(self.wb_dx_var.get()); cfg.wb_dy = float(self.wb_dy_var.get())
+-        cfg.wb_save_png = bool(self.wb_save_png_var.get()); cfg.wb_save_json = bool(self.wb_save_json_var.get())
+-    return cfg
++    def _update_wb_xyz_preview(self) -> None:
++        try:
++            p = rtp_to_xyz(float(self.wb_r_var.get()), float(self.wb_theta_var.get()), float(self.wb_phi_var.get()))
++            self._wb_xyz_label.configure(text=f"XYZ: ({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f}) m")
++        except Exception as e:
++            self._wb_xyz_label.configure(text=f"XYZ: (error: {e})")
+ 
+ 
+ def main():
+@@ -1272,4 +2149,3 @@ def main():
+ 
+ if __name__ == "__main__":
+     main()
+-
+diff --git a/nearfield/heatmaps.py b/nearfield/heatmaps.py
+new file mode 100644
+index 0000000..9caeb16
+--- /dev/null
++++ b/nearfield/heatmaps.py
+@@ -0,0 +1,88 @@
++import numpy as np
++from typing import Tuple
++import math
++
++SPEED_OF_LIGHT = 299_792_458.0
++
++
++def make_theta_phi_grid(theta_deg: np.ndarray, phi_deg: np.ndarray) -> np.ndarray:
++    """Return (P,2) mesh flattened with columns [theta_deg, phi_deg]."""
++    th = np.asarray(theta_deg, dtype=np.float64)
++    ph = np.asarray(phi_deg, dtype=np.float64)
++    TH, PH = np.meshgrid(th, ph, indexing="xy")
++    return np.stack([TH.reshape(-1), PH.reshape(-1)], axis=1)
++
++
++def make_radius_grid(r_vals: np.ndarray, theta_deg: float, phi_deg: float) -> np.ndarray:
++    """Return (P,1) radii for a fixed angular slice (helper/placeholder)."""
++    r = np.asarray(r_vals, dtype=np.float64).reshape(-1, 1)
++    return r
++
++
++def _rtp_to_xyz(r: float, theta_deg: float, phi_deg: float) -> np.ndarray:
++    th = math.radians(float(theta_deg))
++    ph = math.radians(float(phi_deg))
++    cph = math.cos(ph)
++    return np.array([
++        r * cph * math.cos(th),
++        r * cph * math.sin(th),
++        r * math.sin(ph),
++    ], dtype=np.float64)
++
++
++def _spherical_steering(xyz_m: np.ndarray, p_xyz: np.ndarray, fc_hz: float) -> np.ndarray:
++    lam = SPEED_OF_LIGHT / float(fc_hz)
++    k = 2.0 * math.pi / lam
++    d = np.linalg.norm(p_xyz[None, :] - xyz_m, axis=1)
++    a = np.exp(-1j * k * d)
++    a = a / (np.linalg.norm(a) + 1e-12)
++    return a.astype(np.complex128)
++
++
++def build_steering_on_angular_slice(
++    xyz_m: np.ndarray,
++    fc_hz: float,
++    r_fixed_m: float,
++    theta_phi_grid: np.ndarray,
++) -> np.ndarray:
++    """Return (P,M) spherical steering at fixed radius over (theta,phi)."""
++    P = theta_phi_grid.shape[0]
++    M = xyz_m.shape[0]
++    # Convert to XYZ (P,3)
++    pts = np.stack([
++        _rtp_to_xyz(r_fixed_m, float(t), float(p)) for t, p in theta_phi_grid
++    ], axis=0)
++    # Compute distances (P,M)
++    lam = SPEED_OF_LIGHT / float(fc_hz)
++    k = 2.0 * math.pi / lam
++    diff = pts[:, None, :] - xyz_m[None, :, :]
++    d = np.linalg.norm(diff, axis=2)
++    A = np.exp(-1j * k * d)
++    # Normalize rows to unit norm
++    norms = np.linalg.norm(A, axis=1, keepdims=True) + 1e-12
++    A = (A / norms).astype(np.complex128)
++    return A
++
++
++def build_steering_on_radial_slice(
++    xyz_m: np.ndarray,
++    fc_hz: float,
++    r_vals: np.ndarray,
++    theta_deg: float,
++    phi_deg: float,
++) -> np.ndarray:
++    """Return (P,M) steering over radii at fixed angles."""
++    r = np.asarray(r_vals, dtype=np.float64).reshape(-1)
++    P = r.shape[0]
++    pts = np.stack([
++        _rtp_to_xyz(float(rv), theta_deg, phi_deg) for rv in r
++    ], axis=0)
++    lam = SPEED_OF_LIGHT / float(fc_hz)
++    k = 2.0 * math.pi / lam
++    diff = pts[:, None, :] - xyz_m[None, :, :]
++    d = np.linalg.norm(diff, axis=2)
++    A = np.exp(-1j * k * d)
++    norms = np.linalg.norm(A, axis=1, keepdims=True) + 1e-12
++    A = (A / norms).astype(np.complex128)
++    return A
++
+diff --git a/nearfield/metrics_aag_amg.py b/nearfield/metrics_aag_amg.py
+new file mode 100644
+index 0000000..6238004
+--- /dev/null
++++ b/nearfield/metrics_aag_amg.py
+@@ -0,0 +1,96 @@
++import numpy as np
++from typing import Literal, Optional
++
++
++def focusing_gain(w: np.ndarray, a: np.ndarray) -> float:
++    """|w^H a|^2 / ||w||^2, scalar.
++
++    Parameters
++    ----------
++    w : np.ndarray
++        Weight vector (M,)
++    a : np.ndarray
++        Steering vector (M,)
++    """
++    w = np.asarray(w)
++    a = np.asarray(a)
++    num = np.abs(np.vdot(w, a)) ** 2
++    den = (np.linalg.norm(w) ** 2) + 1e-12
++    return float(num / den)
++
++
++def _to_db(x: np.ndarray | float) -> np.ndarray | float:
++    return 10.0 * np.log10(np.maximum(x, 1e-12))
++
++
++def per_point_gains(
++    weights: np.ndarray,
++    steering_grid: np.ndarray,
++    mode: Literal["linear", "db"] = "db",
++) -> np.ndarray:
++    """Return (P,) gains for plotting/stats.
++
++    weights: (M,) or (P,M)
++    steering_grid: (P,M)
++    """
++    W = np.asarray(weights)
++    A = np.asarray(steering_grid)
++    if A.ndim != 2:
++        raise ValueError("steering_grid must be 2D (P,M)")
++    P, M = A.shape
++
++    if W.ndim == 1:
++        if W.shape[0] != M:
++            raise ValueError("weights shape mismatch with steering_grid")
++        # v = A @ conj(W)
++        v = A @ np.conjugate(W)
++        num = np.abs(v) ** 2
++        den = (np.linalg.norm(W) ** 2) + 1e-12
++        g = num / den
++    elif W.ndim == 2:
++        if W.shape != A.shape:
++            raise ValueError("weights and steering_grid must have same shape when weights is 2D")
++        v = np.einsum("pm,pm->p", np.conjugate(W), A)
++        num = np.abs(v) ** 2
++        den = np.sum(np.abs(W) ** 2, axis=1) + 1e-12
++        g = num / den
++    else:
++        raise ValueError("weights must be 1D or 2D")
++
++    if mode == "db":
++        return _to_db(g.astype(np.float64))
++    if mode == "linear":
++        return g.astype(np.float64)
++    raise ValueError("mode must be 'linear' or 'db'")
++
++
++def aag_over_grid(
++    weights: np.ndarray,
++    steering_grid: np.ndarray,
++    mode: Literal["linear", "db"] = "db",
++) -> float:
++    """Return scalar AAG. Accepts vectorized steering grid.
++
++    weights: (M,) or (P,M)
++    steering_grid: (P,M)
++    """
++    g = per_point_gains(weights, steering_grid, mode="linear")
++    val = float(np.mean(g))
++    return float(_to_db(val)) if mode == "db" else val
++
++
++def amag_over_grid(
++    steering_grid: np.ndarray,
++    mode: Literal["linear", "db"] = "db",
++) -> float:
++    """Return scalar AMAG using ideal w = a/||a|| per point.
++
++    For steering vectors a_p (rows), the ideal gain equals ||a_p||^2.
++    """
++    A = np.asarray(steering_grid)
++    if A.ndim != 2:
++        raise ValueError("steering_grid must be 2D (P,M)")
++    g = np.sum(np.abs(A) ** 2, axis=1)
++    val = float(np.mean(g))
++    return float(_to_db(val)) if mode == "db" else val
++
+diff --git a/nearfield/plotting_interactive.py b/nearfield/plotting_interactive.py
+new file mode 100644
+index 0000000..fd315b7
+--- /dev/null
++++ b/nearfield/plotting_interactive.py
+@@ -0,0 +1,103 @@
++import numpy as np
++import plotly.graph_objects as go
++
++
++def _reshape_map(theta_deg: np.ndarray, phi_deg: np.ndarray, values_db: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
++    th = np.asarray(theta_deg).reshape(-1)
++    ph = np.asarray(phi_deg).reshape(-1)
++    v = np.asarray(values_db)
++    n_th = th.shape[0]
++    n_ph = ph.shape[0]
++    if v.ndim == 1:
++        if v.shape[0] != n_th * n_ph:
++            raise ValueError("values_db size mismatch with theta/phi grid")
++        Z = v.reshape(n_ph, n_th)
++    elif v.ndim == 2:
++        if v.shape != (n_ph, n_th):
++            raise ValueError("values_db 2D must be (len(phi), len(theta))")
++        Z = v
++    else:
++        raise ValueError("values_db must be 1D or 2D")
++    return th, ph, Z
++
++
++def heatmap_theta_phi(
++    theta_deg: np.ndarray,
++    phi_deg: np.ndarray,
++    values_db: np.ndarray,
++    title: str,
++) -> "go.Figure":
++    th, ph, Z = _reshape_map(theta_deg, phi_deg, values_db)
++    fig = go.Figure(
++        data=go.Heatmap(
++            x=th,
++            y=ph,
++            z=Z,
++            colorscale="Viridis",
++            colorbar=dict(title="dB"),
++            hovertemplate="╬╕=%{x:.1f}┬░, ╧ò=%{y:.1f}┬░<br>G=%{z:.2f} dB<extra></extra>",
++        )
++    )
++    fig.update_layout(
++        title=title,
++        xaxis_title="╬╕ (deg)",
++        yaxis_title="╧ò (deg)",
++        template="plotly_white",
++    )
++    return fig
++
++
++def surface_theta_phi(
++    theta_deg: np.ndarray,
++    phi_deg: np.ndarray,
++    values_db: np.ndarray,
++    title: str,
++) -> "go.Figure":
++    th, ph, Z = _reshape_map(theta_deg, phi_deg, values_db)
++    TH, PH = np.meshgrid(th, ph, indexing="xy")
++    fig = go.Figure(
++        data=go.Surface(
++            x=TH,
++            y=PH,
++            z=Z,
++            colorscale="Viridis",
++            colorbar=dict(title="dB"),
++            hovertemplate="╬╕=%{x:.1f}┬░, ╧ò=%{y:.1f}┬░<br>G=%{z:.2f} dB<extra></extra>",
++        )
++    )
++    fig.update_layout(
++        title=title,
++        scene=dict(
++            xaxis_title="╬╕ (deg)",
++            yaxis_title="╧ò (deg)",
++            zaxis_title="G (dB)",
++        ),
++        template="plotly_white",
++    )
++    return fig
++
++
++def line_radial_slice(
++    r_vals: np.ndarray,
++    values_db: np.ndarray,
++    title: str,
++) -> "go.Figure":
++    r = np.asarray(r_vals).reshape(-1)
++    v = np.asarray(values_db).reshape(-1)
++    fig = go.Figure(
++        data=go.Scatter(
++            x=r,
++            y=v,
++            mode="lines+markers",
++            hovertemplate="r=%{x:.2f} m<br>G=%{y:.2f} dB<extra></extra>",
++            name="Gain",
++        )
++    )
++    fig.update_layout(
++        title=title,
++        xaxis_title="r (m)",
++        yaxis_title="G (dB)",
++        template="plotly_white",
++    )
++    return fig
++
+diff --git a/tests/test_heatmaps_shapes.py b/tests/test_heatmaps_shapes.py
+new file mode 100644
+index 0000000..8bfd56f
+--- /dev/null
++++ b/tests/test_heatmaps_shapes.py
+@@ -0,0 +1,40 @@
++import numpy as np
++from nearfield.heatmaps import (
++    make_theta_phi_grid,
++    build_steering_on_angular_slice,
++    build_steering_on_radial_slice,
++)
++
++
++SPEED_OF_LIGHT = 299_792_458.0
++
++
++def make_array(nx: int, ny: int, dx: float, dy: float) -> np.ndarray:
++    xs = (np.arange(nx) - (nx - 1) / 2.0) * dx
++    ys = (np.arange(ny) - (ny - 1) / 2.0) * dy
++    xv, yv = np.meshgrid(xs, ys, indexing="xy")
++    M = nx * ny
++    xyz = np.zeros((M, 3), dtype=np.float64)
++    xyz[:, 0] = xv.reshape(-1)
++    xyz[:, 1] = yv.reshape(-1)
++    return xyz
++
++
++def test_angular_and_radial_shapes():
++    nx = ny = 4
++    lam = SPEED_OF_LIGHT / 28e9
++    dx = dy = 0.5 * lam
++    xyz = make_array(nx, ny, dx, dy)
++    theta = np.linspace(-30, 30, 7)
++    phi = np.linspace(-15, 15, 5)
++    grid = make_theta_phi_grid(theta, phi)
++    A = build_steering_on_angular_slice(xyz, 28e9, 5.0, grid)
++    assert A.shape == (grid.shape[0], xyz.shape[0])
++    # Radial slice
++    r = np.linspace(2.0, 8.0, 10)
++    B = build_steering_on_radial_slice(xyz, 28e9, r, 0.0, 0.0)
++    assert B.shape == (r.shape[0], xyz.shape[0])
++    # Gains should be finite
++    assert np.isfinite(np.sum(np.abs(A) ** 2))
++    assert np.isfinite(np.sum(np.abs(B) ** 2))
++
+diff --git a/tests/test_metrics_aag_amg.py b/tests/test_metrics_aag_amg.py
+new file mode 100644
+index 0000000..b0521df
+--- /dev/null
++++ b/tests/test_metrics_aag_amg.py
+@@ -0,0 +1,27 @@
++import numpy as np
++from nearfield.metrics_aag_amg import focusing_gain, aag_over_grid, amag_over_grid, per_point_gains
++
++
++def test_focusing_gain_simple():
++    w = np.array([1.0, 0.0], dtype=np.complex128)
++    a = np.array([1.0, 0.0], dtype=np.complex128)
++    g = focusing_gain(w, a)
++    assert np.isclose(g, 1.0)
++
++
++def test_amag_ge_aag():
++    rng = np.random.default_rng(0)
++    P, M = 32, 8
++    A = rng.standard_normal((P, M)) + 1j * rng.standard_normal((P, M))
++    # Normalize rows to unit norm
++    A = (A / (np.linalg.norm(A, axis=1, keepdims=True) + 1e-12)).astype(np.complex128)
++    # Use a fixed mismatched weight for AAG
++    w = A[0].copy()
++    aag = aag_over_grid(w, A, mode="linear")
++    amag = amag_over_grid(A, mode="linear")
++    assert amag >= aag - 1e-12
++    # Per-point are finite and <= 1 for normalized steering
++    g = per_point_gains(w, A, mode="linear")
++    assert np.all(np.isfinite(g))
++    assert np.all(g <= 1.0 + 1e-9)
++
