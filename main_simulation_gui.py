@@ -65,6 +65,14 @@ except Exception:
     plotly_surface_theta_phi = None  # type: ignore
     plotly_line_radial_slice = None  # type: ignore
 
+# Optional optimizer (GWO)
+try:
+    from nearfield.optim.gwo import gwo_minimize  # type: ignore
+    from nearfield.optim.adapters import make_objective  # type: ignore
+except Exception:  # pragma: no cover - optional
+    gwo_minimize = None  # type: ignore
+    make_objective = None  # type: ignore
+
 # --- Physical constants ---
 SPEED_OF_LIGHT = 299_792_458.0
 
@@ -248,6 +256,14 @@ class RunConfig:
     adv_save_png: bool = False
     adv_chunk: int = 2048
 
+    # Optimizer (optional)
+    use_gwo: bool = False
+    gwo_n_agents: int = 30
+    gwo_n_iter: int = 200
+    gwo_seed: Optional[int] = None
+    gwo_patience: Optional[int] = None
+    gwo_target: str = "Max Gain @ focus"
+
     # Computed/optional
     callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
     cancel_flag: Optional[threading.Event] = None
@@ -353,6 +369,21 @@ class ExperimentController:
             cfg.adv_save_csv = bool(self.gui.adv_save_csv_var.get())
             cfg.adv_save_png = bool(self.gui.adv_save_png_var.get())
             cfg.adv_chunk = int(self.gui.adv_chunk_var.get())
+        except Exception:
+            pass
+
+        # Optimizer (optional)
+        try:
+            cfg.use_gwo = bool(self.gui.opt_use_gwo_var.get())
+            cfg.gwo_n_agents = int(self.gui.opt_agents_var.get())
+            cfg.gwo_n_iter = int(self.gui.opt_iters_var.get())
+            tgt = self.gui.opt_target_var.get()
+            if tgt:
+                cfg.gwo_target = tgt
+            seed_val = (self.gui.opt_seed_var.get() or "").strip()
+            cfg.gwo_seed = int(seed_val) if seed_val else cfg.seed
+            pat = (self.gui.opt_patience_var.get() or "").strip()
+            cfg.gwo_patience = int(pat) if pat else None
         except Exception:
             pass
 
@@ -670,9 +701,46 @@ def run_wideband_compare_ttd_vs_phase(cfg: RunConfig) -> dict:
     bw = float(cfg.wb_bw_hz)
     freqs = np.linspace(f0 - bw / 2.0, f0 + bw / 2.0, K)
 
-    # PS weights designed at fc
+    # PS weights designed at fc (baseline)
     a0 = _spherical_steering_vector(xyz_m, p, f0)
     w_ps = a0 / (np.linalg.norm(a0) + 1e-12)
+
+    # Optional GWO optimizer for phase-only weights across band
+    if cfg.use_gwo and make_objective is not None and gwo_minimize is not None:
+        try:
+            log("Starting GWO optimizer for phase-only wideband weights...\n")
+            func, bounds, post = make_objective(cfg.gwo_target, cfg, {
+                "xyz_m": xyz_m,
+                "p_xyz": p,
+                "freqs_hz": np.asarray(freqs, dtype=np.float64),
+            })
+            # Attach cancel event for cooperative cancellation
+            try:
+                setattr(func, "__cancel_event__", cfg.cancel_flag)
+            except Exception:
+                pass
+            x_best, f_best, info = gwo_minimize(
+                func,
+                bounds,
+                n_agents=int(max(4, cfg.gwo_n_agents)),
+                n_iter=int(max(1, cfg.gwo_n_iter)),
+                seed=cfg.gwo_seed,
+                clamp=True,
+                early_stop_patience=cfg.gwo_patience,
+            )
+            log(f"GWO finished: iters={info.get('iterations')} best={f_best:.6f} evals={info.get('n_evals')}\n")
+            # Log brief history
+            try:
+                hist = info.get('hist', [])
+                for i, v in enumerate(hist):
+                    if (i % max(1, int(len(hist) / 10))) == 0:
+                        log(f"  iter={i}: best={float(v):.6f}\n")
+            except Exception:
+                pass
+            sol = post(x_best)
+            w_ps = np.asarray(sol.get("weights", w_ps))
+        except Exception as e:
+            log(f"GWO optimizer error (continuing with baseline weights): {e}\n")
 
     # TTD weights: delays to align at point p
     tau = np.linalg.norm(p[None, :] - xyz_m, axis=1) / SPEED_OF_LIGHT  # (M,)
@@ -1263,7 +1331,14 @@ class MainSimulationGUI:
 
         # Left: controls inside scrollable pane
         self._pane_left = ScrollablePane(paned, width=500)
+        # Ensure the inner body expands horizontally
+        try:
+            self._pane_left.body.grid_columnconfigure(0, weight=1)
+        except Exception:
+            pass
         controls = ttk.Labelframe(self._pane_left.body, text="Controls", padding=(12, 10))
+        # Place the controls frame inside the scrollable body's grid
+        controls.grid(row=0, column=0, sticky="nwe")
         controls.grid_columnconfigure(0, weight=0)
         controls.grid_columnconfigure(1, weight=1)
 
@@ -1411,6 +1486,7 @@ class MainSimulationGUI:
             lambda e: self.plots_canvas.configure(scrollregion=self.plots_canvas.bbox("all")),
         )
         self._fig_canvases = []
+        self._plot_toolbar = None  # Single toolbar instance for Plots tab
 
         # Summary tab
         self.summary_tab = ttk.Frame(self.nb)
@@ -1769,6 +1845,8 @@ class MainSimulationGUI:
             )
             self.plots_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             self.plots_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            # Reset toolbar handle on rebuild
+            self._plot_toolbar = None
         # Clear previous canvases (only children within container, not the scroll widgets)
         for w in list(self.plots_container.winfo_children()):
             try:
@@ -1776,6 +1854,13 @@ class MainSimulationGUI:
             except Exception:
                 pass
         self._fig_canvases.clear()
+        # Ensure any old toolbar is dropped
+        try:
+            if self._plot_toolbar is not None:
+                self._plot_toolbar.destroy()
+                self._plot_toolbar = None
+        except Exception:
+            self._plot_toolbar = None
 
         # Build figures using a simulator with same preset
         try:
@@ -1798,20 +1883,30 @@ class MainSimulationGUI:
             except Exception:
                 pass
 
-        for fig in figs:
+        first_canvas = None
+        for i, fig in enumerate(figs):
             canvas = FigureCanvasTkAgg(fig, master=self.plots_container)
             canvas.draw()
-            # Pack without expansion to preserve native size; scrolling shows overflow
             widget = canvas.get_tk_widget()
             widget.pack(side=tk.TOP, anchor='nw', pady=(2, 0))
-            try:
-                toolbar = NavigationToolbar2Tk(canvas, self.plots_container)
-                toolbar.update()
-                sep = ttk.Separator(self.plots_container, orient='horizontal')
-                sep.pack(fill='x', pady=(2, 6))
-            except Exception:
-                pass
+            # Keep the first canvas as the toolbar target
+            if i == 0:
+                first_canvas = canvas
+            # Subtle spacing between figures
+            if i < len(figs) - 1:
+                try:
+                    sep = ttk.Separator(self.plots_container, orient='horizontal')
+                    sep.pack(fill='x', pady=(2, 6))
+                except Exception:
+                    pass
             self._fig_canvases.append(canvas)
+        # Create a single toolbar (bound to first canvas) if figures exist
+        try:
+            if first_canvas is not None:
+                self._plot_toolbar = NavigationToolbar2Tk(first_canvas, self.plots_container)
+                self._plot_toolbar.update()
+        except Exception:
+            pass
 
         # Update textual summary
         self._set_summary_text(self._build_summary_text(results))
@@ -1921,6 +2016,13 @@ class MainSimulationGUI:
                 except Exception:
                     pass
             self._fig_canvases.clear()
+            # Remove the single toolbar if present
+            try:
+                if self._plot_toolbar is not None:
+                    self._plot_toolbar.destroy()
+            except Exception:
+                pass
+            self._plot_toolbar = None
         except Exception:
             pass
 
@@ -1930,11 +2032,16 @@ class MainSimulationGUI:
             canvas.draw()
             widget = canvas.get_tk_widget()
             widget.pack(side=tk.TOP, anchor='nw', pady=(2, 0))
-            # Add Matplotlib toolbar for zoom/pan and save
+            # Maintain a single toolbar: replace existing toolbar to bind to latest canvas
             try:
-                toolbar = NavigationToolbar2Tk(canvas, self.plots_container)
-                toolbar.update()
-                # Subtle spacing between multiple figures
+                if self._plot_toolbar is not None:
+                    self._plot_toolbar.destroy()
+                self._plot_toolbar = NavigationToolbar2Tk(canvas, self.plots_container)
+                self._plot_toolbar.update()
+            except Exception:
+                pass
+            # Subtle spacing after figure
+            try:
                 sep = ttk.Separator(self.plots_container, orient='horizontal')
                 sep.pack(fill='x', pady=(2, 6))
             except Exception:
@@ -2153,6 +2260,32 @@ class MainSimulationGUI:
         ttk.Checkbutton(wb_body, text="Save summary (JSON)", variable=self.wb_save_json_var).grid(row=4, column=1, sticky=tk.W)
         ttk.Checkbutton(wb_body, text="Save HTML (interactive)", variable=self.wb_save_html_var).grid(row=4, column=2, sticky=tk.W)
 
+        # Optimizer (optional) panel
+        opt_body = make_fold(wrapper, "Optimizer (optional)", r)
+        try:
+            opt_body.bind("<Map>", lambda e: self._after_layout_refresh())
+            opt_body.bind("<Unmap>", lambda e: self._after_layout_refresh())
+        except Exception:
+            pass
+        r += 2
+        self.opt_use_gwo_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt_body, text="Use GWO optimizer", variable=self.opt_use_gwo_var).grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        ttk.Label(opt_body, text="n_agents").grid(row=1, column=0, sticky=tk.W)
+        self.opt_agents_var = tk.IntVar(value=30)
+        ttk.Entry(opt_body, textvariable=self.opt_agents_var, width=10).grid(row=1, column=1, sticky=tk.W)
+        ttk.Label(opt_body, text="n_iter").grid(row=1, column=2, sticky=tk.W, padx=(8, 0))
+        self.opt_iters_var = tk.IntVar(value=200)
+        ttk.Entry(opt_body, textvariable=self.opt_iters_var, width=10).grid(row=1, column=3, sticky=tk.W)
+        ttk.Label(opt_body, text="seed").grid(row=2, column=0, sticky=tk.W)
+        self.opt_seed_var = tk.StringVar(value="")
+        ttk.Entry(opt_body, textvariable=self.opt_seed_var, width=10).grid(row=2, column=1, sticky=tk.W)
+        ttk.Label(opt_body, text="patience").grid(row=2, column=2, sticky=tk.W, padx=(8, 0))
+        self.opt_patience_var = tk.StringVar(value="")
+        ttk.Entry(opt_body, textvariable=self.opt_patience_var, width=10).grid(row=2, column=3, sticky=tk.W)
+        ttk.Label(opt_body, text="target").grid(row=3, column=0, sticky=tk.W)
+        self.opt_target_var = tk.StringVar(value="Max Gain @ focus")
+        ttk.Combobox(opt_body, textvariable=self.opt_target_var, values=["Max Gain @ focus", "Min Gain Flatness", "Custom (advanced)"], state="readonly").grid(row=3, column=1, columnspan=3, sticky="ew")
+
         # Advanced overrides for experiments
         adv_body = make_fold(wrapper, "Advanced overrides", r)
         try:
@@ -2186,6 +2319,7 @@ class MainSimulationGUI:
                 "Spherical Codebook": sc_body,
                 "Evaluate Codebook Mismatch": ev_body,
                 "Wideband: TTD vs Phase": wb_body,
+                "Optimizer (optional)": opt_body,
                 "Advanced overrides": adv_body,
                 "Advanced AAG/AMAG Maps": maps_body,
             }
@@ -2297,6 +2431,8 @@ class MainSimulationGUI:
                 "Evaluate Codebook Mismatch": bool(self.exp_eval_cb_var.get()),
                 "Wideband: TTD vs Phase": bool(self.exp_wideband_cb_var.get()),
                 "Advanced AAG/AMAG Maps": bool(self.exp_adv_maps_cb_var.get()),
+                # Show optimizer only when relevant experiments are on
+                "Optimizer (optional)": bool(self.exp_wideband_cb_var.get() or self.exp_adv_maps_cb_var.get()),
             }
             folds = getattr(self, "_fold_sections", {})
             for title, desired in mapping.items():
